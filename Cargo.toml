@@ -8,3 +8,5 @@ edition = "2018"
 
 [dependencies]
 arrayvec = "0.4.11"
+log = "0.4.8"
+bit-vec = "0.6.1"

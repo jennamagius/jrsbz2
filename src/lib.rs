@@ -382,3 +382,144 @@ fn huff_test() {
         _ => panic!(),
     }
 }
+
+enum DecoderState {
+    StreamStart { idx: usize },
+    BlockStart { idx: usize },
+    BlockTrees,
+    Error,
+}
+
+impl Default for DecoderState {
+    fn default() -> Self {
+        DecoderState::StreamStart { idx: 0 }
+    }
+}
+
+#[derive(Default)]
+pub struct Decoder {
+    state: DecoderState,
+    level: Option<u8>,
+    crc32: ArrayVec<[u8; 4]>,
+    orig_ptr: u32,
+    misaligned_bit_accumulator: Vec<bool>,
+}
+
+impl Decoder {
+    pub fn push_byte(&mut self, byte: u8) -> Result<Option<Vec<u8>>, &'static str> {
+        let result = self.push_byte2(byte);
+        if result.is_err() {
+            self.state = DecoderState::Error;
+        }
+        result
+    }
+
+    fn push_byte2(&mut self, byte: u8) -> Result<Option<Vec<u8>>, &'static str> {
+        match self.state {
+            DecoderState::StreamStart { ref mut idx } => match idx {
+                0 => {
+                    if byte != b'B' {
+                        Err("bad magic")
+                    } else {
+                        *idx += 1;
+                        Ok(None)
+                    }
+                }
+                1 => {
+                    if byte != b'Z' {
+                        Err("bad magic")
+                    } else {
+                        *idx += 1;
+                        Ok(None)
+                    }
+                }
+                2 => {
+                    if byte != b'h' {
+                        Err("bad version")
+                    } else {
+                        *idx += 1;
+                        Ok(None)
+                    }
+                }
+                3 => {
+                    if !b"123456789".iter().any(|x| *x == byte) {
+                        Err("bad level")
+                    } else {
+                        let level = byte.checked_sub(b'0').unwrap();
+                        debug_assert!(level >= 1);
+                        debug_assert!(level <= 9);
+                        self.level = Some(level);
+                        self.state = DecoderState::BlockStart { idx: 0 };
+                        Ok(None)
+                    }
+                }
+                _ => Err("internal error"),
+            },
+            DecoderState::BlockStart { ref mut idx } => match idx {
+                0..=5 => {
+                    if byte != b"\x31\x41\x59\x26\x53\x59"[*idx] {
+                        Err("bad block magic")
+                    } else {
+                        *idx += 1;
+                        Ok(None)
+                    }
+                }
+                6..=9 => {
+                    self.crc32.push(byte);
+                    *idx += 1;
+                    Ok(None)
+                }
+                10 => {
+                    let randomized = byte & 0b1000_0000;
+                    if randomized != 0 {
+                        Err("randomized byte set")
+                    } else {
+                        *idx += 1;
+                        self.stash_bits(byte, 7);
+                        Ok(None)
+                    }
+                }
+                11..=13 => {
+                    *idx += 1;
+                    self.stash_bits(byte, 8);
+                    Ok(None)
+                }
+                14 => {
+                    self.misaligned_bit_accumulator
+                        .push(byte & 0b1000_0000 != 0);
+                    assert!(self.misaligned_bit_accumulator.len() == 24);
+                    let mut orig_ptr = 0u32;
+                    for i in self.misaligned_bit_accumulator.drain(..) {
+                        orig_ptr <<= 1;
+                        if i {
+                            orig_ptr |= 1;
+                        }
+                    }
+                    self.orig_ptr = orig_ptr;
+                    log::trace!("orig_ptr: {}", orig_ptr);
+                    self.state = DecoderState::BlockTrees;
+                    self.stash_bits(byte, 7);
+                    Ok(None)
+                }
+                _ => Err("internal error"),
+            },
+            DecoderState::BlockTrees => {
+                unimplemented!();
+            }
+            DecoderState::Error => {
+                log::warn!("Pushing byte into errored decoder");
+                Err("already errored")
+            }
+        }
+    }
+
+    fn stash_bits(&mut self, mut byte: u8, how_many: u8) {
+        assert!(how_many <= 8);
+        byte = byte << (8 - how_many);
+        for _ in 0..how_many {
+            self.misaligned_bit_accumulator
+                .push(byte & 0b1000_0000 != 0);
+            byte = byte << 1;
+        }
+    }
+}
