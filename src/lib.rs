@@ -386,8 +386,14 @@ fn huff_test() {
 enum DecoderState {
     StreamStart { idx: usize },
     BlockStart { idx: usize },
-    BlockTrees,
+    BlockTrees { state: BlockTreesState },
+    StreamFooter { idx: usize },
     Error,
+}
+
+enum BlockTreesState {
+    SymMapL1,
+    SymMapL2 { page_count: u16 },
 }
 
 impl Default for DecoderState {
@@ -402,11 +408,13 @@ pub struct Decoder {
     level: Option<u8>,
     crc32: ArrayVec<[u8; 4]>,
     orig_ptr: u32,
-    misaligned_bit_accumulator: Vec<bool>,
+    stack: Vec<u8>,
+    accumulator: Vec<bool>,
 }
 
 impl Decoder {
     pub fn push_byte(&mut self, byte: u8) -> Result<Option<Vec<u8>>, &'static str> {
+        self.stash_bits(byte, 8);
         let result = self.push_byte2(byte);
         if result.is_err() {
             self.state = DecoderState::Error;
@@ -457,11 +465,14 @@ impl Decoder {
             },
             DecoderState::BlockStart { ref mut idx } => match idx {
                 0..=5 => {
-                    if byte != b"\x31\x41\x59\x26\x53\x59"[*idx] {
-                        Err("bad block magic")
-                    } else {
+                    if *idx == 0 && byte == 0x17 {
+                        self.state = DecoderState::StreamFooter { idx: 1 };
+                        Ok(None)
+                    } else if byte == b"\x31\x41\x59\x26\x53\x59"[*idx] {
                         *idx += 1;
                         Ok(None)
+                    } else {
+                        Err("bad block magic")
                     }
                 }
                 6..=9 => {
@@ -485,11 +496,10 @@ impl Decoder {
                     Ok(None)
                 }
                 14 => {
-                    self.misaligned_bit_accumulator
-                        .push(byte & 0b1000_0000 != 0);
-                    assert!(self.misaligned_bit_accumulator.len() == 24);
+                    self.accumulator.push(byte & 0b1000_0000 != 0);
+                    assert!(self.accumulator.len() == 24);
                     let mut orig_ptr = 0u32;
-                    for i in self.misaligned_bit_accumulator.drain(..) {
+                    for i in self.accumulator.drain(..) {
                         orig_ptr <<= 1;
                         if i {
                             orig_ptr |= 1;
@@ -497,15 +507,57 @@ impl Decoder {
                     }
                     self.orig_ptr = orig_ptr;
                     log::trace!("orig_ptr: {}", orig_ptr);
-                    self.state = DecoderState::BlockTrees;
+                    self.state = DecoderState::BlockTrees {
+                        state: BlockTreesState::SymMapL1,
+                    };
                     self.stash_bits(byte, 7);
                     Ok(None)
                 }
                 _ => Err("internal error"),
             },
-            DecoderState::BlockTrees => {
-                unimplemented!();
-            }
+            DecoderState::BlockTrees { ref mut state } => match state {
+                BlockTreesState::SymMapL1 => {
+                    if self.accumulator.len() + 8 < 16 {
+                        self.stash_bits(byte, 8);
+                        Ok(None)
+                    } else if self.accumulator.len() == 15 {
+                        let mut map: u16 = 0;
+                        self.accumulator.push(byte & 0b1000_0000 != 0);
+                        for i in self.accumulator.drain(..) {
+                            map <<= 1;
+                            if i {
+                                map |= 1;
+                            }
+                        }
+                        *state = BlockTreesState::SymMapL2 { page_count: map };
+                        self.stash_bits(byte, 7);
+                        Ok(None)
+                    } else {
+                        Err("internal error")
+                    }
+                }
+                BlockTreesState::SymMapL2 { page_count } => {
+                    if self.accumulator.len() + 8 < (*page_count * 16).into() {
+                        self.stash_bits(byte, 8);
+                        Ok(None)
+                    } else if self.accumulator.len() + 1 == (*page_count * 16).into() {
+                        self.accumulator.push(byte & 0b1000_0000 != 0);
+                        let mut page_number = 0;
+                        while !self.accumulator.is_empty() {
+                            for (k, v) in self.accumulator.drain(..16).enumerate() {
+                                let k: u8 = k.try_into().unwrap();
+                                if v {
+                                    self.stack.push(page_number * 16 + k);
+                                }
+                            }
+                            page_number += 1;
+                        }
+                        unimplemented!();
+                    } else {
+                        Err("internal error")
+                    }
+                }
+            },
             DecoderState::Error => {
                 log::warn!("Pushing byte into errored decoder");
                 Err("already errored")
@@ -517,8 +569,7 @@ impl Decoder {
         assert!(how_many <= 8);
         byte = byte << (8 - how_many);
         for _ in 0..how_many {
-            self.misaligned_bit_accumulator
-                .push(byte & 0b1000_0000 != 0);
+            self.accumulator.push(byte & 0b1000_0000 != 0);
             byte = byte << 1;
         }
     }
