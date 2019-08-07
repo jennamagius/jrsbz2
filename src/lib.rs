@@ -412,37 +412,44 @@ pub struct Decoder {
     accumulator: Vec<bool>,
 }
 
+const NEED_BITS: &'static str = "not enough bytes";
+
 impl Decoder {
-    pub fn push_byte(&mut self, byte: u8) -> Result<Option<Vec<u8>>, &'static str> {
+    pub fn push_byte(&mut self, byte: u8) -> Result<Vec<u8>, &'static str> {
         self.stash_bits(byte, 8);
-        let result = self.push_byte2(byte);
-        if result.is_err() {
-            self.state = DecoderState::Error;
+        let mut final_result = Vec::new();
+        loop {
+            let result = self.consume();
+            match result {
+                Ok(Some(data)) => {
+                    final_result.extend(data);
+                }
+                Ok(None) => (),
+                Err(NEED_BITS) => {
+                    break;
+                }
+                Err(err) => {
+                    self.state = DecoderState::Error;
+                    return Err(err);
+                }
+            }
         }
-        result
+        Ok(final_result)
     }
 
-    fn push_byte2(&mut self, byte: u8) -> Result<Option<Vec<u8>>, &'static str> {
+    fn consume(&mut self) -> Result<Option<Vec<u8>>, &'static str> {
         match self.state {
             DecoderState::StreamStart { ref mut idx } => match idx {
                 0 => {
-                    if byte != b'B' {
+                    if consume_bytes(&mut self.accumulator, 2)? != b"BZ" {
                         Err("bad magic")
                     } else {
-                        *idx += 1;
-                        Ok(None)
-                    }
-                }
-                1 => {
-                    if byte != b'Z' {
-                        Err("bad magic")
-                    } else {
-                        *idx += 1;
+                        *idx += 2;
                         Ok(None)
                     }
                 }
                 2 => {
-                    if byte != b'h' {
+                    if consume_byte(&mut self.accumulator)? != b'h' {
                         Err("bad version")
                     } else {
                         *idx += 1;
@@ -450,6 +457,7 @@ impl Decoder {
                     }
                 }
                 3 => {
+                    let byte = consume_byte(&mut self.accumulator)?;
                     if !b"123456789".iter().any(|x| *x == byte) {
                         Err("bad level")
                     } else {
@@ -464,99 +472,78 @@ impl Decoder {
                 _ => Err("internal error"),
             },
             DecoderState::BlockStart { ref mut idx } => match idx {
-                0..=5 => {
-                    if *idx == 0 && byte == 0x17 {
-                        self.state = DecoderState::StreamFooter { idx: 1 };
+                0 => {
+                    let magic = consume_bytes(&mut self.accumulator, 6)?;
+                    if magic == b"\x17\x72\x45\x38\x50\x90" {
+                        self.state = DecoderState::StreamFooter { idx: 6 };
                         Ok(None)
-                    } else if byte == b"\x31\x41\x59\x26\x53\x59"[*idx] {
-                        *idx += 1;
+                    } else if magic == b"\x31\x41\x59\x26\x53\x59" {
+                        *idx = 6;
                         Ok(None)
                     } else {
                         Err("bad block magic")
                     }
                 }
-                6..=9 => {
-                    self.crc32.push(byte);
-                    *idx += 1;
+                6 => {
+                    let crc = consume_bytes(&mut self.accumulator, 4)?;
+                    self.crc32.extend(crc);
+                    *idx = 10;
                     Ok(None)
                 }
                 10 => {
-                    let randomized = byte & 0b1000_0000;
-                    if randomized != 0 {
+                    let randomized = consume_bit(&mut self.accumulator)?;
+                    if randomized {
                         Err("randomized byte set")
                     } else {
-                        *idx += 1;
-                        self.stash_bits(byte, 7);
+                        *idx = 11;
                         Ok(None)
                     }
                 }
-                11..=13 => {
-                    *idx += 1;
-                    self.stash_bits(byte, 8);
-                    Ok(None)
-                }
-                14 => {
-                    self.accumulator.push(byte & 0b1000_0000 != 0);
-                    assert!(self.accumulator.len() == 24);
-                    let mut orig_ptr = 0u32;
-                    for i in self.accumulator.drain(..) {
-                        orig_ptr <<= 1;
-                        if i {
-                            orig_ptr |= 1;
-                        }
-                    }
-                    self.orig_ptr = orig_ptr;
-                    log::trace!("orig_ptr: {}", orig_ptr);
+                11 => {
+                    let orig_ptr = consume_bytes(&mut self.accumulator, 3)?;
+                    let mut orig_ptr2 = [0u8; 4];
+                    orig_ptr2[1..=3].copy_from_slice(&orig_ptr);
+                    self.orig_ptr = u32::from_be_bytes(orig_ptr2);
+                    log::trace!("orig_ptr: {}", self.orig_ptr);
                     self.state = DecoderState::BlockTrees {
                         state: BlockTreesState::SymMapL1,
                     };
-                    self.stash_bits(byte, 7);
                     Ok(None)
                 }
                 _ => Err("internal error"),
             },
             DecoderState::BlockTrees { ref mut state } => match state {
                 BlockTreesState::SymMapL1 => {
-                    if self.accumulator.len() + 8 < 16 {
-                        self.stash_bits(byte, 8);
-                        Ok(None)
-                    } else if self.accumulator.len() == 15 {
-                        let mut map: u16 = 0;
-                        self.accumulator.push(byte & 0b1000_0000 != 0);
-                        for i in self.accumulator.drain(..) {
-                            map <<= 1;
-                            if i {
-                                map |= 1;
-                            }
-                        }
-                        *state = BlockTreesState::SymMapL2 { page_count: map };
-                        self.stash_bits(byte, 7);
-                        Ok(None)
-                    } else {
-                        Err("internal error")
-                    }
+                    let page_count = consume_u16(&mut self.accumulator)?;
+                    *state = BlockTreesState::SymMapL2 { page_count };
+                    Ok(None)
                 }
                 BlockTreesState::SymMapL2 { page_count } => {
-                    if self.accumulator.len() + 8 < (*page_count * 16).into() {
-                        self.stash_bits(byte, 8);
-                        Ok(None)
-                    } else if self.accumulator.len() + 1 == (*page_count * 16).into() {
-                        self.accumulator.push(byte & 0b1000_0000 != 0);
-                        let mut page_number = 0;
-                        while !self.accumulator.is_empty() {
-                            for (k, v) in self.accumulator.drain(..16).enumerate() {
-                                let k: u8 = k.try_into().unwrap();
-                                if v {
-                                    self.stack.push(page_number * 16 + k);
-                                }
+                    let pages = consume_bytes(&mut self.accumulator, (*page_count * 2).into())?;
+                    for page in 0..*page_count {
+                        for bit in 0..16 {
+                            let pt2 = if bit >= 8 { 1 } else { 0 };
+                            let byte: u8 = pages[usize::from(page * 2 + pt2)];
+                            let included = (0b1000_0000 >> (bit % 8)) & byte != 0;
+                            if included {
+                                self.stack.push((page * 16 + bit).try_into().unwrap());
                             }
-                            page_number += 1;
                         }
-                        unimplemented!();
-                    } else {
-                        Err("internal error")
                     }
+                    Ok(None)
                 }
+            },
+            DecoderState::StreamFooter { ref mut idx } => match idx {
+                6 => {
+                    let _crc = consume_bytes(&mut self.accumulator, 4)?;
+                    *idx = 10;
+                    Ok(None)
+                }
+                10 => {
+                    // Consume bits until re-byte-aligned
+                    unimplemented!();
+                }
+                _ => Err("internal error"),
             },
             DecoderState::Error => {
                 log::warn!("Pushing byte into errored decoder");
@@ -573,4 +560,46 @@ impl Decoder {
             byte = byte << 1;
         }
     }
+}
+
+fn consume_bit(bits: &mut Vec<bool>) -> Result<bool, &'static str> {
+    if bits.is_empty() {
+        return Err(NEED_BITS);
+    }
+    Ok(bits.remove(0))
+}
+
+fn consume_byte(bits: &mut Vec<bool>) -> Result<u8, &'static str> {
+    if bits.len() < 8 {
+        return Err(NEED_BITS);
+    }
+    let mut result = 0u8;
+    for i in bits.drain(..8) {
+        result <<= 1;
+        if i {
+            result |= 1;
+        }
+    }
+    Ok(result)
+}
+
+fn consume_bytes(bits: &mut Vec<bool>, count: usize) -> Result<Vec<u8>, &'static str> {
+    if bits.len() < count * 8 {
+        return Err(NEED_BITS);
+    }
+    let mut result = Vec::new();
+    for _ in 0..count {
+        result.push(consume_byte(bits).unwrap());
+    }
+    Ok(result)
+}
+
+fn consume_u16(bits: &mut Vec<bool>) -> Result<u16, &'static str> {
+    if bits.len() < 16 {
+        return Err(NEED_BITS);
+    }
+    let mut stack = [0u8; 2];
+    let bytes = consume_bytes(bits, 2).unwrap();
+    stack.copy_from_slice(&bytes);
+    Ok(u16::from_be_bytes(stack))
 }
