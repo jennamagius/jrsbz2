@@ -1,5 +1,8 @@
+// Based on reverse engineering performed by Joe Tsai from https://github.com/dsnet/compress/blob/master/doc/bzip2-format.pdf
+
 use arrayvec::ArrayVec;
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::convert::TryInto;
 
 #[derive(Default)]
@@ -146,6 +149,7 @@ pub enum Symbol {
     RunA,
     RunB,
     Idx(u8),
+    Eob,
 }
 
 pub fn abencode(mut zerocnt: u32) -> Vec<Symbol> {
@@ -387,6 +391,7 @@ enum DecoderState {
     StreamStart { idx: usize },
     BlockStart { idx: usize },
     BlockTrees { state: BlockTreesState },
+    BlockData,
     StreamFooter { idx: usize },
     Error,
 }
@@ -394,6 +399,10 @@ enum DecoderState {
 enum BlockTreesState {
     SymMapL1,
     SymMapL2 { page_count: u16 },
+    NumTrees,
+    NumSels,
+    Selectors,
+    Trees,
 }
 
 impl Default for DecoderState {
@@ -408,8 +417,41 @@ pub struct Decoder {
     level: Option<u8>,
     crc32: ArrayVec<[u8; 4]>,
     orig_ptr: u32,
-    stack: Vec<u8>,
+    stack: Vec<Symbol>,
     accumulator: Vec<bool>,
+    misalignment: u8,
+    num_trees: u8,
+    num_sels: u16,
+    selectors: Vec<u8>,
+    trees: Vec<BTreeMap<Symbol, Vec<bool>>>,
+    block_symbols: Vec<Symbol>,
+}
+
+fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {
+    let mut result = Vec::new();
+    for _ in 0..bits {
+        result.push(code & 1 != 0);
+        code >>= 1;
+    }
+    result.into_iter().rev().collect()
+}
+
+fn tree_to_map(tree: &BTreeMap<Symbol, u8>) -> BTreeMap<Symbol, Vec<bool>> {
+    let mut result = BTreeMap::new();
+    let mut data: Vec<(u8, Symbol)> = tree.iter().map(|(k, v)| (*v, *k)).collect();
+    data.sort();
+    let mut code = 0;
+    for i in 0..data.len() {
+        result.insert(data[i].1, code_to_bits(code, data[i].0));
+        let next_bit_len = data
+            .iter()
+            .skip(i + 1)
+            .next()
+            .map(|x| x.0)
+            .unwrap_or(data[i].0);
+        code = (code + 1) << (next_bit_len - data[i].0)
+    }
+    result
 }
 
 const NEED_BITS: &'static str = "not enough bytes";
@@ -419,7 +461,11 @@ impl Decoder {
         self.stash_bits(byte, 8);
         let mut final_result = Vec::new();
         loop {
+            let pre_len = self.accumulator.len();
             let result = self.consume();
+            let post_len = self.accumulator.len();
+            self.misalignment += u8::try_from((pre_len - post_len) % 8).unwrap();
+            self.misalignment = self.misalignment % 8;
             match result {
                 Ok(Some(data)) => {
                     final_result.extend(data);
@@ -486,6 +532,7 @@ impl Decoder {
                 }
                 6 => {
                     let crc = consume_bytes(&mut self.accumulator, 4)?;
+                    log::trace!("block crc: {:x?}", crc);
                     self.crc32.extend(crc);
                     *idx = 10;
                     Ok(None)
@@ -515,24 +562,186 @@ impl Decoder {
             DecoderState::BlockTrees { ref mut state } => match state {
                 BlockTreesState::SymMapL1 => {
                     let page_count = consume_u16(&mut self.accumulator)?;
+                    log::trace!("SymMapL1: {:b}", page_count);
                     *state = BlockTreesState::SymMapL2 { page_count };
                     Ok(None)
                 }
                 BlockTreesState::SymMapL2 { page_count } => {
-                    let pages = consume_bytes(&mut self.accumulator, (*page_count * 2).into())?;
-                    for page in 0..*page_count {
-                        for bit in 0..16 {
-                            let pt2 = if bit >= 8 { 1 } else { 0 };
-                            let byte: u8 = pages[usize::from(page * 2 + pt2)];
-                            let included = (0b1000_0000 >> (bit % 8)) & byte != 0;
-                            if included {
-                                self.stack.push((page * 16 + bit).try_into().unwrap());
+                    let bytes = consume_bytes(
+                        &mut self.accumulator,
+                        (u16::try_from(page_count.count_ones()).unwrap() * 2).into(),
+                    )?;
+                    let mut skip_count = 0;
+                    for page in 0u8..16 {
+                        if *page_count & (0b1000_0000_0000_0000 >> page) != 0 {
+                            log::trace!("Doing page {}", page);
+                            for bit in 0..16 {
+                                let pt2 = if bit >= 8 { 1 } else { 0 };
+                                let byte_number = usize::from((page - skip_count) * 2 + pt2);
+                                log::trace!("byte number: {:?}", byte_number);
+                                let byte: u8 = bytes[byte_number];
+                                let included = (0b1000_0000 >> (bit % 8)) & byte != 0;
+                                if included {
+                                    let idx = (page * 16 + bit).try_into().unwrap();
+                                    self.stack.push(Symbol::Idx(idx));
+                                }
+                            }
+                        } else {
+                            skip_count += 1;
+                            log::trace!("Skipping page {}", page);
+                        }
+                    }
+                    self.stack.pop();
+                    self.stack.push(Symbol::Eob);
+                    self.stack.insert(0, Symbol::RunB);
+                    self.stack.insert(0, Symbol::RunA);
+                    *state = BlockTreesState::NumTrees;
+                    Ok(None)
+                }
+                BlockTreesState::NumTrees => {
+                    let num_trees_bits = consume_bits(&mut self.accumulator, 3)?;
+                    let mut num_trees = 0;
+                    for i in num_trees_bits {
+                        num_trees <<= 1;
+                        if i {
+                            num_trees |= 1;
+                        }
+                    }
+                    log::trace!("num_trees: {}", num_trees);
+                    self.num_trees = num_trees;
+                    *state = BlockTreesState::NumSels;
+                    Ok(None)
+                }
+                BlockTreesState::NumSels => {
+                    let num_sels_bits = consume_bits(&mut self.accumulator, 15)?;
+                    let mut num_sels = 0u16;
+                    for i in num_sels_bits {
+                        num_sels <<= 1;
+                        if i {
+                            num_sels |= 1;
+                        }
+                    }
+                    self.num_sels = num_sels;
+                    log::trace!("num_sels: {}", num_sels);
+                    *state = BlockTreesState::Selectors;
+                    Ok(None)
+                }
+                BlockTreesState::Selectors => {
+                    if self.selectors.len() == self.num_sels.into() {
+                        log::trace!("Selectors: {:?}", self.selectors);
+                        *state = BlockTreesState::Trees;
+                        Ok(None)
+                    } else {
+                        if !self.accumulator.iter().any(|x| *x == false) {
+                            Err(NEED_BITS)
+                        } else {
+                            let mut selector_number = 0;
+                            while consume_bit(&mut self.accumulator)? {
+                                selector_number += 1
+                            }
+                            if selector_number > 5 {
+                                Err("invalid selector")
+                            } else {
+                                self.selectors.push(selector_number);
+                                Ok(None)
                             }
                         }
                     }
-                    Ok(None)
+                }
+                BlockTreesState::Trees => {
+                    if self.trees.len() == self.num_trees.into() {
+                        self.state = DecoderState::BlockData;
+                        Ok(None)
+                    } else if self.accumulator.len() < 5 {
+                        Err(NEED_BITS)
+                    } else {
+                        let mut cursor = 5;
+                        let clen_bits: Vec<bool> =
+                            self.accumulator.iter().copied().take(5).collect();
+                        let mut clen = 0u8;
+                        for i in clen_bits {
+                            clen <<= 1;
+                            if i {
+                                clen |= 1;
+                            }
+                        }
+                        log::trace!("Initial clen: {}", clen);
+                        let mut tree = BTreeMap::new();
+                        for symbol in &self.stack {
+                            log::trace!("Considering symbol {:?}", symbol);
+                            loop {
+                                let bit = self.accumulator.iter().skip(cursor).next();
+                                cursor += 1;
+                                match bit {
+                                    None => {
+                                        return Err(NEED_BITS);
+                                    }
+                                    Some(true) => {
+                                        let other_bit =
+                                            self.accumulator.iter().skip(cursor).copied().next();
+                                        cursor += 1;
+                                        if other_bit.is_none() {
+                                            return Err(NEED_BITS);
+                                        }
+                                        if other_bit == Some(true) && clen == 0 {
+                                            return Err("tried to decrement clen while at 0");
+                                        } else if other_bit == Some(true) {
+                                            clen -= 1;
+                                            log::trace!("Decrementing clen to {}", clen);
+                                        } else if other_bit == Some(false) && clen == 20 {
+                                            return Err("tried to increment clen above 20");
+                                        } else {
+                                            clen += 1;
+                                            log::trace!("Incrementing clen to {}", clen);
+                                        }
+                                    }
+                                    Some(false) => {
+                                        tree.insert(*symbol, clen);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        log::trace!("tree: {:?}", tree);
+                        let tree = tree_to_map(&tree);
+                        log::trace!("tree map: {:?}", tree);
+                        self.trees.push(tree);
+                        self.accumulator.drain(..cursor);
+                        Ok(None)
+                    }
                 }
             },
+            DecoderState::BlockData => {
+                let mut bits = Vec::new();
+                let mut cursor = 0;
+                loop {
+                    let next_bit = self.accumulator.iter().skip(cursor).next();
+                    cursor += 1;
+                    if next_bit.is_none() {
+                        return Err(NEED_BITS);
+                    }
+                    bits.push(*next_bit.unwrap());
+                    assert!(bits.len() <= 20);
+                    let tree_number: usize = self.selectors[self.block_symbols.len() / 50].into();
+                    if let Some((symbol, _)) = self.trees[tree_number]
+                        .iter()
+                        .filter(|(_k, v)| v == &&bits)
+                        .next()
+                    {
+                        log::trace!(
+                            "Saw symbol: {:?} ({})",
+                            symbol,
+                            self.stack.iter().position(|x| symbol == x).unwrap()
+                        );
+                        if *symbol == Symbol::Eob {
+                            unimplemented!();
+                        }
+                        self.block_symbols.push(*symbol);
+                        self.accumulator.drain(..cursor);
+                        return Ok(None);
+                    }
+                }
+            }
             DecoderState::StreamFooter { ref mut idx } => match idx {
                 6 => {
                     let _crc = consume_bytes(&mut self.accumulator, 4)?;
@@ -540,8 +749,11 @@ impl Decoder {
                     Ok(None)
                 }
                 10 => {
-                    // Consume bits until re-byte-aligned
-                    unimplemented!();
+                    let padding_size = 8 - self.misalignment;
+                    assert!(padding_size < 8);
+                    consume_bits(&mut self.accumulator, padding_size.into())?;
+                    self.state = DecoderState::StreamStart { idx: 0 };
+                    Ok(None)
                 }
                 _ => Err("internal error"),
             },
@@ -567,6 +779,13 @@ fn consume_bit(bits: &mut Vec<bool>) -> Result<bool, &'static str> {
         return Err(NEED_BITS);
     }
     Ok(bits.remove(0))
+}
+
+fn consume_bits(bits: &mut Vec<bool>, count: usize) -> Result<Vec<bool>, &'static str> {
+    if bits.len() < count {
+        return Err(NEED_BITS);
+    }
+    Ok(bits.drain(..count).collect())
 }
 
 fn consume_byte(bits: &mut Vec<bool>) -> Result<u8, &'static str> {
@@ -602,4 +821,15 @@ fn consume_u16(bits: &mut Vec<bool>) -> Result<u16, &'static str> {
     let bytes = consume_bytes(bits, 2).unwrap();
     stack.copy_from_slice(&bytes);
     Ok(u16::from_be_bytes(stack))
+}
+
+#[cfg(test)]
+#[test]
+fn format_decode_test() {
+    env_logger::init();
+    let data = b"\x42\x5a\x68\x31\x31\x41\x59\x26\x53\x59\x5a\x55\xc4\x1e\x00\x00\x0c\x5f\x80\x20\x00\x40\x84\x00\x00\x80\x20\x40\x00\x2f\x6c\xdc\x80\x20\x00\x48\x4a\x9a\x4c\xd5\x53\xfc\x69\xa5\x53\xff\x55\x3f\x69\x50\x15\x48\x95\x4f\xff\x55\x51\xff\xaa\xa0\xff\xf5\x55\x31\xff\xaa\xa7\xfb\x4b\x34\xc9\xb8\x38\xff\x16\x14\x56\x5a\xe2\x8b\x9d\x50\xb9\x00\x81\x1a\x91\xfa\x25\x4f\x08\x5f\x4b\x5f\x53\x92\x4b\x11\xc5\x22\x92\xd9\x50\x56\x6b\x6f\x9e\x17\x72\x45\x38\x50\x90\x5a\x55\xc4\x1e";
+    let mut decoder = Decoder::default();
+    for byte in &data[..] {
+        decoder.push_byte(*byte);
+    }
 }
