@@ -18,6 +18,7 @@ fn main() {
                 std::io::Write::write_all(&mut stdout_lock, &result).unwrap();
             }
             Ok(0) => {
+                log::trace!("No more to read");
                 break;
             }
             x => panic!("{:?}", x),
