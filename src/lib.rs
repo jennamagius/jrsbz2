@@ -166,6 +166,20 @@ pub fn abencode(mut zerocnt: u32) -> Vec<Symbol> {
     result
 }
 
+pub fn abdecode(symbols: &[Symbol]) -> u32 {
+    let mut result = 0u32;
+    for &i in symbols.iter().rev() {
+        assert!(i == Symbol::RunA || i == Symbol::RunB);
+        result <<= 1;
+        if i == Symbol::RunB {
+            result |= 1;
+        }
+    }
+    result |= 1 << symbols.len();
+    result -= 1;
+    result
+}
+
 #[cfg(test)]
 #[test]
 fn abencode_test() {
@@ -203,6 +217,11 @@ fn abencode_test() {
     assert_eq!(abencode(31).len(), 5);
     assert_eq!(abencode(62).len(), 5);
     assert_eq!(abencode(63).len(), 6);
+    for i in 0..=64 {
+        let encoded = abencode(i);
+        let decoded = abdecode(&encoded[..]);
+        assert_eq!(decoded, i);
+    }
 }
 
 pub fn rle2_encode(data: &[u8]) -> Vec<Symbol> {
@@ -359,6 +378,32 @@ pub fn canonicalize_huff(huff: BTreeMap<Symbol, Vec<bool>>) -> BTreeMap<Symbol, 
     result
 }
 
+fn decode_bwt_slow(bwt: &[u8], ptr: usize) -> Vec<u8> {
+    log::trace!("PTR: {}", ptr);
+    let mut matrix = Vec::new();
+    for _ in bwt {
+        let mut row = Vec::new();
+        row.resize(bwt.len(), 0);
+        matrix.push(row);
+    }
+    for ci in (0..bwt.len()).rev() {
+        log::trace!("decode_bwt_slow ci: {}", ci);
+        for (ri, &b) in bwt.iter().enumerate() {
+            matrix[ri][ci] = b;
+        }
+        matrix.sort();
+    }
+    log::trace!("Input: {:x?}", String::from_utf8(bwt.to_vec()));
+    for (idx, row) in matrix.iter().enumerate() {
+        log::trace!("Row {}: {:x?}", idx, String::from_utf8(row.clone()));
+    }
+    return matrix[usize::try_from(ptr).unwrap()].clone();
+}
+
+fn decode_bwt(bwt: &[u8], ptr: usize) -> Vec<u8> {
+    decode_bwt_slow(bwt, ptr) // put some suffix array thing here to go fast
+}
+
 #[cfg(test)]
 #[test]
 fn huff_test() {
@@ -425,6 +470,7 @@ pub struct Decoder {
     selectors: Vec<u8>,
     trees: Vec<BTreeMap<u16, Vec<bool>>>,
     block_symbols: Vec<u16>,
+    block_symbols2: Vec<u8>,
 }
 
 fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {
@@ -520,7 +566,9 @@ impl Decoder {
             DecoderState::BlockStart { ref mut idx } => match idx {
                 0 => {
                     let magic = consume_bytes(&mut self.accumulator, 6)?;
+                    log::trace!("Magic: {:x?}", magic);
                     if magic == b"\x17\x72\x45\x38\x50\x90" {
+                        log::trace!("Saw streamfooter");
                         self.state = DecoderState::StreamFooter { idx: 6 };
                         Ok(None)
                     } else if magic == b"\x31\x41\x59\x26\x53\x59" {
@@ -724,8 +772,15 @@ impl Decoder {
                         .filter(|(_k, v)| v == &&bits)
                         .next()
                     {
-                        log::trace!("Saw symbol: {}", symbol);
+                        log::trace!(
+                            "Saw symbol: {} (idx: {}, tree: {})",
+                            symbol,
+                            self.block_symbols.len(),
+                            tree_number
+                        );
                         if *symbol == u16::try_from(self.stack.len() + 1).unwrap() {
+                            self.state = DecoderState::BlockStart { idx: 0 };
+                            self.accumulator.drain(..cursor);
                             return Ok(Some(self.decode_block()));
                         }
                         self.block_symbols.push(*symbol);
@@ -766,7 +821,90 @@ impl Decoder {
     }
 
     fn decode_block(&mut self) -> Vec<u8> {
-        unimplemented!()
+        self.un_rle2();
+        self.un_mtf();
+        self.un_bwt();
+        self.un_rle1();
+        let mut tmp = Vec::new();
+        std::mem::swap(&mut self.block_symbols2, &mut tmp);
+        self.trees.clear();
+        self.selectors.clear();
+        tmp
+    }
+
+    fn un_rle1(&mut self) {
+        let mut result = Vec::new();
+        let mut last = None;
+        let mut count = 0;
+        for &i in &self.block_symbols2 {
+            if count == 4 {
+                for _ in 0..i {
+                    result.push(last.unwrap());
+                }
+                count = 0;
+                last = None;
+            } else {
+                if Some(i) == last {
+                    count += 1;
+                    result.push(i);
+                } else {
+                    count = 1;
+                    result.push(i);
+                    last = Some(i);
+                }
+            }
+        }
+        std::mem::replace(&mut self.block_symbols2, result);
+    }
+
+    fn un_bwt(&mut self) {
+        let ptr: usize = self.orig_ptr.try_into().unwrap();
+        let result = decode_bwt(&self.block_symbols2, ptr);
+        std::mem::replace(&mut self.block_symbols2, result);
+    }
+
+    fn un_mtf(&mut self) {
+        let mut new_block = Vec::new();
+        for &i in &self.block_symbols {
+            let symbol = self.stack.remove(i.into());
+            log::trace!("Emitting a {:x?}", symbol);
+            new_block.push(symbol);
+            self.stack.insert(0, symbol);
+        }
+        std::mem::replace(&mut self.block_symbols2, new_block);
+    }
+
+    fn un_rle2(&mut self) {
+        if self.block_symbols.is_empty() {
+            return;
+        }
+        log::trace!("Starting with {} symbols", self.block_symbols.len());
+        let mut new_block = Vec::new();
+        let mut ab_accumulator = Vec::new();
+        for &i in &self.block_symbols {
+            if i != 0 && i != 1 {
+                if ab_accumulator.is_empty() {
+                    log::trace!("Pushing a single {}", i - 1);
+                    new_block.push(i - 1);
+                } else {
+                    let count = abdecode(&ab_accumulator);
+                    log::trace!("Pushing {} zeros, then a {}", count, i - 1);
+                    for _ in 0..count {
+                        new_block.push(0);
+                    }
+                    ab_accumulator.clear();
+                    new_block.push(i - 1);
+                }
+            } else {
+                ab_accumulator.push(if i == 0 { Symbol::RunA } else { Symbol::RunB });
+            }
+        }
+        for _ in 0..abdecode(&ab_accumulator) {
+            log::trace!("Pushing a trailing zero");
+            new_block.push(0);
+        }
+        log::trace!("new_block_len: {}", new_block.len());
+        std::mem::replace(&mut self.block_symbols, new_block);
     }
 }
 
@@ -825,7 +963,22 @@ fn format_decode_test() {
     env_logger::init();
     let data = b"\x42\x5a\x68\x31\x31\x41\x59\x26\x53\x59\x5a\x55\xc4\x1e\x00\x00\x0c\x5f\x80\x20\x00\x40\x84\x00\x00\x80\x20\x40\x00\x2f\x6c\xdc\x80\x20\x00\x48\x4a\x9a\x4c\xd5\x53\xfc\x69\xa5\x53\xff\x55\x3f\x69\x50\x15\x48\x95\x4f\xff\x55\x51\xff\xaa\xa0\xff\xf5\x55\x31\xff\xaa\xa7\xfb\x4b\x34\xc9\xb8\x38\xff\x16\x14\x56\x5a\xe2\x8b\x9d\x50\xb9\x00\x81\x1a\x91\xfa\x25\x4f\x08\x5f\x4b\x5f\x53\x92\x4b\x11\xc5\x22\x92\xd9\x50\x56\x6b\x6f\x9e\x17\x72\x45\x38\x50\x90\x5a\x55\xc4\x1e";
     let mut decoder = Decoder::default();
+    let mut result = Vec::new();
     for byte in &data[..] {
-        decoder.push_byte(*byte);
+        match decoder.push_byte(*byte) {
+            Ok(data) => {
+                result.extend(data);
+            }
+            _ => (),
+        }
     }
+    assert_eq!(&result[..], &b"If Peter Piper picked a peck of pickled peppers, where\'s the peck of pickled peppers Peter Piper picked?????"[..]);
+}
+
+#[cfg(test)]
+#[test]
+fn decode_bwt_test() {
+    env_logger::init();
+    let data = b"?fsrrdkkeaddrrffs,es???d\x01     eeiiiieeeehrppkllkppttpphppPPIootwppppPPcccccckk      iipp    eeeeeeeeer'ree  ";
+    assert_eq!(&decode_bwt(data, 24)[..], &b"If Peter Piper picked a peck of pickled peppers, where\'s the peck of pickled peppers Peter Piper picked????\x01"[..]);
 }
