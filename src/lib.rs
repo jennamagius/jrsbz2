@@ -1,4 +1,4 @@
-// Based on reverse engineering performed by Joe Tsai from https://github.com/dsnet/compress/blob/master/doc/bzip2-format.pdf
+// Based on reverse engineering performed by Joe Tsai from https://github.com/dsnet/compress/blob/master/doc/bzip2-format.pdf (https://digital-static.net)
 
 use arrayvec::ArrayVec;
 use std::collections::BTreeMap;
@@ -353,6 +353,7 @@ pub fn huff_to_bits(
     result
 }
 
+#[allow(dead_code)]
 fn decode_bwt_slow(bwt: &[u8], ptr: usize) -> Vec<u8> {
     log::trace!("PTR: {}", ptr);
     let mut matrix = Vec::new();
@@ -376,7 +377,33 @@ fn decode_bwt_slow(bwt: &[u8], ptr: usize) -> Vec<u8> {
 }
 
 fn decode_bwt(bwt: &[u8], ptr: usize) -> Vec<u8> {
-    decode_bwt_slow(bwt, ptr) // put some suffix array thing here to go fast
+    let mut cumm = Vec::new();
+    let mut n = 0;
+    cumm.resize(256, 0);
+    for &i in bwt {
+        cumm[usize::from(i)] += 1;
+    }
+    for idx in 0..cumm.len() {
+        let v = cumm[idx];
+        cumm[idx] = n;
+        n += v;
+    }
+
+    let mut perm = Vec::new();
+    perm.resize(bwt.len(), 0);
+    for (k, &v) in bwt.iter().enumerate() {
+        perm[cumm[usize::from(v)]] = k;
+        cumm[usize::from(v)] += 1;
+    }
+
+    let mut i = perm[ptr];
+    let mut data = Vec::new();
+    data.resize(bwt.len(), 0);
+    for j in 0..bwt.len() {
+        data[j] = bwt[i];
+        i = perm[i];
+    }
+    data
 }
 
 enum DecoderState {
