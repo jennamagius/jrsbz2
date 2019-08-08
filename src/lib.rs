@@ -137,7 +137,7 @@ pub fn mtf_encode(data: &mut [u8]) -> Vec<u8> {
 #[test]
 fn mtf_test() {
     let mut data = b"bbyaeeeeeeafeeeybzzzzzzzzzyz".to_vec();
-    let stack = mtf_encode(&mut data);
+    let _stack = mtf_encode(&mut data);
     assert_eq!(
         &data[..],
         [1, 0, 4, 2, 3, 0, 0, 0, 0, 0, 1, 4, 2, 0, 0, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1]
@@ -149,7 +149,6 @@ pub enum Symbol {
     RunA,
     RunB,
     Idx(u8),
-    Eob,
 }
 
 pub fn abencode(mut zerocnt: u32) -> Vec<Symbol> {
@@ -354,30 +353,6 @@ pub fn huff_to_bits(
     result
 }
 
-pub fn canonicalize_huff(huff: BTreeMap<Symbol, Vec<bool>>) -> BTreeMap<Symbol, Vec<bool>> {
-    let max_len = huff.values().map(|x| x.len()).max().unwrap();
-    let min_len = huff.values().map(|x| x.len()).min().unwrap();
-    let mut result = BTreeMap::new();
-    for i in min_len..=max_len {
-        let mut symbols_at_len: Vec<Symbol> = huff
-            .iter()
-            .filter(|(_k, v)| v.len() == i)
-            .map(|(k, _v)| k.clone())
-            .collect();
-        let mut reprs_at_len: Vec<Vec<bool>> = huff
-            .iter()
-            .filter(|(_k, v)| v.len() == i)
-            .map(|(_k, v)| v.clone())
-            .collect();
-        symbols_at_len.sort();
-        reprs_at_len.sort();
-        for (repr, symbol) in reprs_at_len.into_iter().zip(symbols_at_len.into_iter()) {
-            result.insert(symbol, repr);
-        }
-    }
-    result
-}
-
 fn decode_bwt_slow(bwt: &[u8], ptr: usize) -> Vec<u8> {
     log::trace!("PTR: {}", ptr);
     let mut matrix = Vec::new();
@@ -402,34 +377,6 @@ fn decode_bwt_slow(bwt: &[u8], ptr: usize) -> Vec<u8> {
 
 fn decode_bwt(bwt: &[u8], ptr: usize) -> Vec<u8> {
     decode_bwt_slow(bwt, ptr) // put some suffix array thing here to go fast
-}
-
-#[cfg(test)]
-#[test]
-fn huff_test() {
-    let data = b"aaaaaaaaaaaaaaabbbbbbbccccccddddddeeeee".to_vec();
-    let mut data: Vec<Symbol> = data.iter().map(|x| Symbol::Idx(*x)).collect();
-    let tree = huff_encode(&data);
-    println!("Tree: {:?}", tree);
-    println!("Map: {:?}", huff_to_bits(&tree, vec![]));
-    println!(
-        "Canonical map: {:?}",
-        canonicalize_huff(huff_to_bits(&tree, vec![]))
-    );
-    match tree {
-        HuffmanNode::Node {
-            weight,
-            left,
-            right,
-        } => match *left {
-            HuffmanNode::Leaf { symbol, weight } => {
-                assert_eq!(symbol, Symbol::Idx(b'a'));
-                assert_eq!(weight, 15);
-            }
-            _ => panic!(),
-        },
-        _ => panic!(),
-    }
 }
 
 enum DecoderState {
@@ -796,7 +743,10 @@ impl Decoder {
                     Ok(None)
                 }
                 10 => {
-                    let padding_size = 8 - self.misalignment;
+                    let mut padding_size = 8 - self.misalignment;
+                    if padding_size == 8 {
+                        padding_size = 0;
+                    }
                     assert!(padding_size < 8);
                     consume_bits(&mut self.accumulator, padding_size.into())?;
                     self.state = DecoderState::StreamStart { idx: 0 };
@@ -958,9 +908,12 @@ fn consume_u16(bits: &mut Vec<bool>) -> Result<u16, &'static str> {
 }
 
 #[cfg(test)]
+static LOGGER_INIT: std::sync::Once = std::sync::Once::new();
+
+#[cfg(test)]
 #[test]
 fn format_decode_test() {
-    env_logger::init();
+    LOGGER_INIT.call_once(env_logger::init);
     let data = b"\x42\x5a\x68\x31\x31\x41\x59\x26\x53\x59\x5a\x55\xc4\x1e\x00\x00\x0c\x5f\x80\x20\x00\x40\x84\x00\x00\x80\x20\x40\x00\x2f\x6c\xdc\x80\x20\x00\x48\x4a\x9a\x4c\xd5\x53\xfc\x69\xa5\x53\xff\x55\x3f\x69\x50\x15\x48\x95\x4f\xff\x55\x51\xff\xaa\xa0\xff\xf5\x55\x31\xff\xaa\xa7\xfb\x4b\x34\xc9\xb8\x38\xff\x16\x14\x56\x5a\xe2\x8b\x9d\x50\xb9\x00\x81\x1a\x91\xfa\x25\x4f\x08\x5f\x4b\x5f\x53\x92\x4b\x11\xc5\x22\x92\xd9\x50\x56\x6b\x6f\x9e\x17\x72\x45\x38\x50\x90\x5a\x55\xc4\x1e";
     let mut decoder = Decoder::default();
     let mut result = Vec::new();
@@ -978,7 +931,7 @@ fn format_decode_test() {
 #[cfg(test)]
 #[test]
 fn decode_bwt_test() {
-    env_logger::init();
+    LOGGER_INIT.call_once(env_logger::init);
     let data = b"?fsrrdkkeaddrrffs,es???d\x01     eeiiiieeeehrppkllkppttpphppPPIootwppppPPcccccckk      iipp    eeeeeeeeer'ree  ";
     assert_eq!(&decode_bwt(data, 24)[..], &b"If Peter Piper picked a peck of pickled peppers, where\'s the peck of pickled peppers Peter Piper picked????\x01"[..]);
 }
