@@ -417,14 +417,14 @@ pub struct Decoder {
     level: Option<u8>,
     crc32: ArrayVec<[u8; 4]>,
     orig_ptr: u32,
-    stack: Vec<Symbol>,
+    stack: Vec<u8>,
     accumulator: Vec<bool>,
     misalignment: u8,
     num_trees: u8,
     num_sels: u16,
     selectors: Vec<u8>,
-    trees: Vec<BTreeMap<Symbol, Vec<bool>>>,
-    block_symbols: Vec<Symbol>,
+    trees: Vec<BTreeMap<u16, Vec<bool>>>,
+    block_symbols: Vec<u16>,
 }
 
 fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {
@@ -436,9 +436,9 @@ fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {
     result.into_iter().rev().collect()
 }
 
-fn tree_to_map(tree: &BTreeMap<Symbol, u8>) -> BTreeMap<Symbol, Vec<bool>> {
+fn tree_to_map(tree: &BTreeMap<u16, u8>) -> BTreeMap<u16, Vec<bool>> {
     let mut result = BTreeMap::new();
-    let mut data: Vec<(u8, Symbol)> = tree.iter().map(|(k, v)| (*v, *k)).collect();
+    let mut data: Vec<(u8, u16)> = tree.iter().map(|(k, v)| (*v, *k)).collect();
     data.sort();
     let mut code = 0;
     for i in 0..data.len() {
@@ -583,7 +583,7 @@ impl Decoder {
                                 let included = (0b1000_0000 >> (bit % 8)) & byte != 0;
                                 if included {
                                     let idx = (page * 16 + bit).try_into().unwrap();
-                                    self.stack.push(Symbol::Idx(idx));
+                                    self.stack.push(idx);
                                 }
                             }
                         } else {
@@ -591,10 +591,6 @@ impl Decoder {
                             log::trace!("Skipping page {}", page);
                         }
                     }
-                    self.stack.pop();
-                    self.stack.push(Symbol::Eob);
-                    self.stack.insert(0, Symbol::RunB);
-                    self.stack.insert(0, Symbol::RunA);
                     *state = BlockTreesState::NumTrees;
                     Ok(None)
                 }
@@ -667,8 +663,8 @@ impl Decoder {
                         }
                         log::trace!("Initial clen: {}", clen);
                         let mut tree = BTreeMap::new();
-                        for symbol in &self.stack {
-                            log::trace!("Considering symbol {:?}", symbol);
+                        for value in 0u16..u16::try_from(self.stack.len() + 2).unwrap() {
+                            log::trace!("Considering value {:?}", value);
                             loop {
                                 let bit = self.accumulator.iter().skip(cursor).next();
                                 cursor += 1;
@@ -696,7 +692,7 @@ impl Decoder {
                                         }
                                     }
                                     Some(false) => {
-                                        tree.insert(*symbol, clen);
+                                        tree.insert(value, clen);
                                         break;
                                     }
                                 }
@@ -728,13 +724,9 @@ impl Decoder {
                         .filter(|(_k, v)| v == &&bits)
                         .next()
                     {
-                        log::trace!(
-                            "Saw symbol: {:?} ({})",
-                            symbol,
-                            self.stack.iter().position(|x| symbol == x).unwrap()
-                        );
-                        if *symbol == Symbol::Eob {
-                            unimplemented!();
+                        log::trace!("Saw symbol: {}", symbol);
+                        if *symbol == u16::try_from(self.stack.len() + 1).unwrap() {
+                            return Ok(Some(self.decode_block()));
                         }
                         self.block_symbols.push(*symbol);
                         self.accumulator.drain(..cursor);
@@ -771,6 +763,10 @@ impl Decoder {
             self.accumulator.push(byte & 0b1000_0000 != 0);
             byte = byte << 1;
         }
+    }
+
+    fn decode_block(&mut self) -> Vec<u8> {
+        unimplemented!()
     }
 }
 
