@@ -814,6 +814,10 @@ impl Decoder {
         std::mem::swap(&mut self.block_symbols2, &mut tmp);
         self.trees.clear();
         self.selectors.clear();
+        self.block_symbols.clear();
+        self.stack.clear();
+        self.num_sels = 0;
+        self.num_trees = 0;
         tmp
     }
 
