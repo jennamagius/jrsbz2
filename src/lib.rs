@@ -446,6 +446,7 @@ pub struct Decoder {
     trees: Vec<BTreeMap<u16, Vec<bool>>>,
     block_symbols: Vec<u16>,
     block_symbols2: Vec<u8>,
+    selectors_mtf: Vec<u8>,
 }
 
 fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {
@@ -628,6 +629,7 @@ impl Decoder {
                     }
                     log::trace!("num_trees: {}", num_trees);
                     self.num_trees = num_trees;
+                    self.selectors_mtf = (0..num_trees).collect();
                     *state = BlockTreesState::NumSels;
                     Ok(None)
                 }
@@ -655,13 +657,16 @@ impl Decoder {
                             Err(NEED_BITS)
                         } else {
                             let mut selector_number = 0;
-                            while consume_bit(&mut self.accumulator)? {
+                            while consume_bit(&mut self.accumulator).unwrap() {
                                 selector_number += 1
                             }
-                            if selector_number > 5 {
+                            if selector_number > self.num_trees {
                                 Err("invalid selector")
                             } else {
-                                self.selectors.push(selector_number);
+                                let result =
+                                    self.selectors_mtf.remove(usize::from(selector_number));
+                                self.selectors.push(result);
+                                self.selectors_mtf.insert(0, result);
                                 Ok(None)
                             }
                         }
@@ -687,7 +692,7 @@ impl Decoder {
                         log::trace!("Initial clen: {}", clen);
                         let mut tree = BTreeMap::new();
                         for value in 0u16..u16::try_from(self.stack.len() + 2).unwrap() {
-                            log::trace!("Considering value {:?}", value);
+                            //log::trace!("Considering value {:?}", value);
                             loop {
                                 let bit = self.accumulator.iter().skip(cursor).next();
                                 cursor += 1;
@@ -740,7 +745,9 @@ impl Decoder {
                         return Err(NEED_BITS);
                     }
                     bits.push(*next_bit.unwrap());
-                    assert!(bits.len() <= 20);
+                    if bits.len() > 20 {
+                        return Err("bit sequence doesn't match a known huffman code");
+                    }
                     let tree_number: usize = self.selectors[self.block_symbols.len() / 50].into();
                     if let Some((symbol, _)) = self.trees[tree_number]
                         .iter()
