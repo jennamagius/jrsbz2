@@ -39,7 +39,98 @@ impl Encoder {
     }
 
     fn emit_block(&mut self) {
-        unimplemented!();
+        self.emit_bytes(crate::common::BLOCK_MAGIC);
+        self.emit_bit(false); // "Randomized" flag
+        let rle1 = rle_encode(&self.block_buffer);
+        let (mut bwt_data, origin_ptr) = bwt_encode(&rle1);
+        self.emit_bytes(&origin_ptr.to_be_bytes()[1..]); // OrigPtr
+        let mtf_stack: std::collections::BTreeSet<u8> =
+            mtf_encode(&mut bwt_data).into_iter().collect();
+        let mut rle2 = rle2_encode(&bwt_data);
+        rle2.push(Symbol::Eob);
+        log::trace!("rl2: {:?}", rle2);
+        let tree = huff_encode(&rle2);
+        log::trace!("Tree: {:?}", tree);
+        let depth_map = huff_node_to_depth_map(&tree, 0, mtf_stack.len().try_into().unwrap());
+        log::trace!("Depth map: {:?}", depth_map);
+        let code_map = crate::common::depth_map_to_code_map(&depth_map);
+
+        let mut pages_bitset = 0u16;
+        let mut page_vec = Vec::new();
+        for page_number in 0..16 {
+            pages_bitset <<= 1;
+            let mut page_bitset = 0u16;
+            for offset in 0..16 {
+                page_bitset <<= 1;
+                let val = page_number * 16 + offset;
+                if val == 0 || mtf_stack.contains(&(val - 1)) {
+                    pages_bitset |= 1;
+                    page_bitset |= 1;
+                }
+            }
+            if page_bitset != 0 {
+                page_vec.extend(&page_bitset.to_be_bytes());
+            }
+        }
+        self.emit_bytes(&pages_bitset.to_be_bytes()[..]);
+        self.emit_bytes(&page_vec[..]);
+
+        // Emit NumTrees as 0b010.
+        self.emit_bit(false);
+        self.emit_bit(true);
+        self.emit_bit(false);
+
+        let num_symbols: u16 = u16::try_from(bwt_data.len())
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
+        let mut num_sels: u16 = (num_symbols / 50)
+            .checked_add(if num_symbols % 50 != 0 { 1 } else { 0 })
+            .unwrap();
+        let num_sels2 = num_sels;
+        log::trace!("Specifying num_sels as {}", num_sels);
+        for _ in 0..15 {
+            num_sels <<= 1;
+            let bit = num_sels & 0b1000_0000_0000_0000 != 0;
+            log::trace!("Emitting num_sels bit: {}", bit);
+            self.emit_bit(bit);
+        }
+        for _ in 0..num_sels2 {
+            self.emit_bit(false);
+        }
+
+        for _ in 0..2 {
+            let mut clen: u8 = *depth_map.iter().next().unwrap().1;
+            log::trace!("Emitting initial clen: {}", clen);
+            let mut clen2 = clen;
+            for _ in 0..5 {
+                self.emit_bit(clen2 & 0b1_0000 != 0);
+                clen2 <<= 1;
+            }
+            for (_k, v) in &depth_map {
+                log::trace!("Emitting depth {}", v);
+                while clen < *v {
+                    self.emit_bit(true);
+                    self.emit_bit(false);
+                    clen = clen.checked_add(1).unwrap();
+                }
+                while clen > *v {
+                    self.emit_bit(true);
+                    self.emit_bit(true);
+                    clen = clen.checked_sub(1).unwrap();
+                }
+                self.emit_bit(false);
+            }
+        }
+
+        for symbol in rle2 {
+            let code = code_map
+                .get(&symbol.to_u16(mtf_stack.len().try_into().unwrap()))
+                .unwrap();
+            for bit in code {
+                self.emit_bit(*bit);
+            }
+        }
     }
 
     fn emit_stream_header(&mut self) {
@@ -190,7 +281,7 @@ pub fn mtf_encode(data: &mut [u8]) -> Vec<u8> {
         .into_iter()
         .collect();
     for v in data {
-        println!("v: {}, stack: {:?}", v, stack);
+        log::trace!("v: {}, stack: {:?}", v, stack);
         let idx: u8 = stack
             .iter()
             .position(|x| x == v)
@@ -317,20 +408,19 @@ pub fn huff_encode(symbols: &[Symbol]) -> HuffmanNode {
     nodes.remove(0)
 }
 
-fn huff_node_to_depth_map(node: &HuffmanNode, current_depth: u8) -> BTreeMap<u16, u8> {
+fn huff_node_to_depth_map(
+    node: &HuffmanNode,
+    current_depth: u8,
+    num_syms: u8,
+) -> BTreeMap<u16, u8> {
     let mut result = BTreeMap::new();
     if node.is_leaf() {
-        result.insert(node.symbol().to_u16(), current_depth);
+        result.insert(node.symbol().to_u16(num_syms), current_depth);
         result
     } else {
         let next_depth = current_depth.checked_add(1).unwrap();
-        result.extend(huff_node_to_depth_map(node.left(), next_depth));
-        result.extend(huff_node_to_depth_map(node.right(), next_depth));
+        result.extend(huff_node_to_depth_map(node.left(), next_depth, num_syms));
+        result.extend(huff_node_to_depth_map(node.right(), next_depth, num_syms));
         result
     }
-}
-
-pub fn huff_to_bits(tree: &HuffmanNode) -> std::collections::BTreeMap<u16, Vec<bool>> {
-    let depth_map = huff_node_to_depth_map(tree, 0);
-    crate::common::depth_map_to_code_map(&depth_map)
 }

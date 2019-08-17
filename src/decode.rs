@@ -171,7 +171,7 @@ impl Decoder {
                         log::trace!("Saw streamfooter");
                         self.state = DecoderState::StreamFooter { idx: 6 };
                         Ok(None)
-                    } else if magic == b"\x31\x41\x59\x26\x53\x59" {
+                    } else if magic == crate::common::BLOCK_MAGIC {
                         *idx = 6;
                         Ok(None)
                     } else {
@@ -314,6 +314,7 @@ impl Decoder {
                             }
                         }
                         log::trace!("Initial clen: {}", clen);
+                        log::trace!("Trying to eat {} depths.", self.stack.len() + 2);
                         let mut tree = BTreeMap::new();
                         for value in 0u16..u16::try_from(self.stack.len() + 2).unwrap() {
                             //log::trace!("Considering value {:?}", value);

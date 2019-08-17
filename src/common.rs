@@ -4,20 +4,23 @@ use std::convert::TryFrom;
 use std::convert::TryInto;
 
 pub(crate) const STREAM_FOOTER_MAGIC: &[u8] = b"\x17\x72\x45\x38\x50\x90";
+pub(crate) const BLOCK_MAGIC: &[u8] = b"\x31\x41\x59\x26\x53\x59";
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq)]
 pub enum Symbol {
     RunA,
     RunB,
     Idx(u8),
+    Eob,
 }
 
 impl Symbol {
-    pub(crate) fn to_u16(&self) -> u16 {
+    pub(crate) fn to_u16(&self, num_syms: u8) -> u16 {
         match self {
             Symbol::RunA => 0,
             Symbol::RunB => 1,
             Symbol::Idx(a) => u16::from(*a) + 2,
+            Symbol::Eob => u16::from(num_syms - 1),
         }
     }
 }

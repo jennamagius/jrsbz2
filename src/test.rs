@@ -4,9 +4,13 @@ use crate::encode::*;
 
 static LOGGER_INIT: std::sync::Once = std::sync::Once::new();
 
+fn log_init() {
+    LOGGER_INIT.call_once(env_logger::init);
+}
+
 #[test]
 fn format_decode_test() {
-    LOGGER_INIT.call_once(env_logger::init);
+    log_init();
     let data = b"\x42\x5a\x68\x31\x31\x41\x59\x26\x53\x59\x5a\x55\xc4\x1e\x00\x00\x0c\x5f\x80\x20\x00\x40\x84\x00\x00\x80\x20\x40\x00\x2f\x6c\xdc\x80\x20\x00\x48\x4a\x9a\x4c\xd5\x53\xfc\x69\xa5\x53\xff\x55\x3f\x69\x50\x15\x48\x95\x4f\xff\x55\x51\xff\xaa\xa0\xff\xf5\x55\x31\xff\xaa\xa7\xfb\x4b\x34\xc9\xb8\x38\xff\x16\x14\x56\x5a\xe2\x8b\x9d\x50\xb9\x00\x81\x1a\x91\xfa\x25\x4f\x08\x5f\x4b\x5f\x53\x92\x4b\x11\xc5\x22\x92\xd9\x50\x56\x6b\x6f\x9e\x17\x72\x45\x38\x50\x90\x5a\x55\xc4\x1e";
     let mut decoder = Decoder::default();
     let mut result = Vec::new();
@@ -92,4 +96,29 @@ fn mtf_test() {
         &data[..],
         [1, 0, 4, 2, 3, 0, 0, 0, 0, 0, 1, 4, 2, 0, 0, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1]
     );
+}
+
+#[test]
+fn empty_encode_test() {
+    let mut encoder = crate::encode::Encoder::default();
+    let file = encoder.finish();
+    let mut expected = b"BZh9".to_vec();
+    expected.extend(crate::common::STREAM_FOOTER_MAGIC);
+    expected.extend(b"\x00\x00\x00\x00");
+    assert_eq!(&file[..], &expected[..]);
+}
+
+#[test]
+fn encode_decode_test() {
+    log_init();
+    let mut encoder = crate::encode::Encoder::default();
+    let mut result = Vec::new();
+    result.extend(encoder.push_byte(b'a'));
+    result.extend(encoder.finish());
+    let mut decoder = crate::Decoder::default();
+    let mut decode_result: Vec<u8> = Vec::new();
+    for byte in result {
+        decode_result.extend(decoder.push_byte(byte).unwrap());
+    }
+    assert_eq!(&decode_result[..], &b"a"[..]);
 }
