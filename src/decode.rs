@@ -41,9 +41,9 @@ fn decode_bwt_slow(bwt: &[u8], ptr: usize) -> Vec<u8> {
         }
         matrix.sort();
     }
-    log::trace!("Input: {:x?}", String::from_utf8(bwt.to_vec()));
+    log::trace!("Input: {:?}", String::from_utf8(bwt.to_vec()));
     for (idx, row) in matrix.iter().enumerate() {
-        log::trace!("Row {}: {:x?}", idx, String::from_utf8(row.clone()));
+        log::trace!("Row {}: {:?}", idx, String::from_utf8(row.clone()));
     }
     return matrix[usize::try_from(ptr).unwrap()].clone();
 }
@@ -481,7 +481,7 @@ impl Decoder {
         let mut new_block = Vec::new();
         for &i in &self.block_symbols {
             let symbol = self.stack.remove(i.into());
-            log::trace!("Emitting a {:x?}", symbol);
+            log::trace!("Emitting a {:?}", symbol);
             new_block.push(symbol);
             self.stack.insert(0, symbol);
         }

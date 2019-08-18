@@ -18,7 +18,7 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    pub fn push_byte(&mut self, byte: u8) -> Vec<u8> {
+    pub fn push_byte(&mut self, byte: u8) -> Result<Vec<u8>, &'static str> {
         if !self.stream_header_emitted {
             self.emit_stream_header();
         }
@@ -30,10 +30,10 @@ impl Encoder {
         if self.block_buffer.len() == 900_000_000 {
             self.emit_block();
         }
-        self.drain_available_bytes()
+        Ok(self.drain_available_bytes())
     }
 
-    pub fn finish(&mut self) -> Vec<u8> {
+    pub fn finish(&mut self) -> Result<Vec<u8>, &'static str> {
         if !self.stream_header_emitted {
             self.emit_stream_header();
         }
@@ -41,7 +41,7 @@ impl Encoder {
             self.emit_block();
         }
         self.emit_stream_footer();
-        self.drain_available_bytes()
+        Ok(self.drain_available_bytes())
     }
 
     fn emit_block(&mut self) {
@@ -57,6 +57,8 @@ impl Encoder {
         let rle1 = rle_encode(&self.block_buffer);
         self.block_buffer.clear();
         let (mut bwt_data, origin_ptr) = bwt_encode(&rle1);
+        log::trace!("Encode origin_ptr: {:?}", origin_ptr);
+        log::trace!("Encode bwt_data: {:?}", bwt_data);
         let origin_ptr: u32 = u32::try_from(origin_ptr).unwrap();
         self.emit_bytes(&origin_ptr.to_be_bytes()[1..]); // OrigPtr
         let mtf_stack: std::collections::BTreeSet<u8> =
@@ -81,7 +83,8 @@ impl Encoder {
             rle2.pop();
         }
         log::trace!("Tree: {:?}", tree);
-        let depth_map = huff_node_to_depth_map(&tree, 0, &mtf_stack2);
+        let depth_map = huff_node_to_depth_map(&tree, 0, &mtf_stack2).unwrap();
+        assert!(depth_map.len() == mtf_stack.len() + 2);
         log::trace!("Depth map: {:?}", depth_map);
         let code_map = crate::common::depth_map_to_code_map(&depth_map);
 
@@ -154,7 +157,7 @@ impl Encoder {
         }
 
         for symbol in rle2 {
-            let code = code_map.get(&symbol.to_u16(&mtf_stack2)).unwrap();
+            let code = code_map.get(&symbol.to_u16(&mtf_stack2).unwrap()).unwrap();
             for bit in code {
                 self.emit_bit(*bit);
             }
@@ -277,7 +280,29 @@ pub fn bwt_encode(block: &[u8]) -> (Vec<u8>, usize) {
     let mut rotations: Vec<(&[u8], &[u8])> = (0..(block.len()))
         .map(|x| (&block[x..], &block[..x]))
         .collect();
-    rotations.sort();
+    rotations.sort_by(|a, b| {
+        let total_len = a.0.len() + a.1.len();
+        for i in 0..total_len {
+            let left = if i < a.0.len() {
+                a.0[i]
+            } else {
+                a.1[i - a.0.len()]
+            };
+            let right = if i < b.0.len() {
+                b.0[i]
+            } else {
+                b.1[i - b.0.len()]
+            };
+            match left.partial_cmp(&right).unwrap() {
+                std::cmp::Ordering::Equal => (),
+                x => {
+                    return x;
+                }
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    log::trace!("bwt matrix: {:?}", rotations);
     let final_column = rotations
         .iter()
         .map(|(a, b)| {
@@ -367,24 +392,24 @@ impl HuffmanNode {
         }
     }
 
-    fn symbol(&self) -> Symbol {
+    fn symbol(&self) -> Result<Symbol, &'static str> {
         match self {
-            HuffmanNode::Leaf { symbol, .. } => *symbol,
-            HuffmanNode::Node { .. } => panic!(),
+            HuffmanNode::Leaf { symbol, .. } => Ok(*symbol),
+            HuffmanNode::Node { .. } => Err("HuffmanNode::symbol used on an internal node"),
         }
     }
 
-    fn left(&self) -> &HuffmanNode {
+    fn left(&self) -> Result<&HuffmanNode, &'static str> {
         match self {
-            HuffmanNode::Node { left, .. } => &*left,
-            _ => panic!(),
+            HuffmanNode::Node { left, .. } => Ok(&*left),
+            HuffmanNode::Leaf { .. } => Err("HuffmanNode::left used on a leaf node"),
         }
     }
 
-    fn right(&self) -> &HuffmanNode {
+    fn right(&self) -> Result<&HuffmanNode, &'static str> {
         match self {
-            HuffmanNode::Node { right, .. } => &*right,
-            _ => panic!(),
+            HuffmanNode::Node { right, .. } => Ok(&*right),
+            HuffmanNode::Leaf { .. } => Err("HuffmanNode::right used on a leaf node"),
         }
     }
 
@@ -437,27 +462,33 @@ pub fn huff_encode(symbols: &[Symbol]) -> HuffmanNode {
     nodes.remove(0)
 }
 
-fn huff_node_to_depth_map(node: &HuffmanNode, current_depth: u8, syms: &[u8]) -> BTreeMap<u16, u8> {
+fn huff_node_to_depth_map(
+    node: &HuffmanNode,
+    current_depth: u8,
+    syms: &[u8],
+) -> Result<BTreeMap<u16, u8>, &'static str> {
     let mut result = BTreeMap::new();
     if node.is_leaf() {
-        let repr = node.symbol().to_u16(syms);
+        let repr = node.symbol()?.to_u16(syms)?;
         log::trace!("Representing {:?} as {}", node.symbol(), repr);
         result.insert(repr, current_depth);
-        result
+        Ok(result)
     } else {
-        let next_depth = current_depth.checked_add(1).unwrap();
-        result.extend(huff_node_to_depth_map(node.left(), next_depth, syms));
-        result.extend(huff_node_to_depth_map(node.right(), next_depth, syms));
-        result
+        let next_depth = current_depth
+            .checked_add(1)
+            .ok_or("BUG: Huffman tree is >255 deep")?;
+        result.extend(huff_node_to_depth_map(node.left()?, next_depth, syms)?);
+        result.extend(huff_node_to_depth_map(node.right()?, next_depth, syms)?);
+        Ok(result)
     }
 }
 
-pub fn encode(data: &[u8]) -> Vec<u8> {
+pub fn encode(data: &[u8]) -> Result<Vec<u8>, &'static str> {
     let mut result = Vec::new();
     let mut encoder = crate::encode::Encoder::default();
     for i in data {
-        result.extend(encoder.push_byte(*i));
+        result.extend(encoder.push_byte(*i)?);
     }
-    result.extend(encoder.finish());
-    result
+    result.extend(encoder.finish()?);
+    Ok(result)
 }

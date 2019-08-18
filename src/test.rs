@@ -101,7 +101,7 @@ fn mtf_test() {
 #[test]
 fn empty_encode_test() {
     let mut encoder = crate::encode::Encoder::default();
-    let file = encoder.finish();
+    let file = encoder.finish().unwrap();
     let mut expected = b"BZh9".to_vec();
     expected.extend(crate::common::STREAM_FOOTER_MAGIC);
     expected.extend(b"\x00\x00\x00\x00");
@@ -118,9 +118,14 @@ fn encode_decode_test() {
         all_bytes.push(i);
     }
     examples.push(all_bytes);
+    examples.push([171, 10, 25, 159, 216, 62, 237, 173, 28, 171].to_vec());
+    let mut rng = rand::thread_rng();
+    let mut random = vec![0u8; 9000];
+    rand::Rng::fill(&mut rng, &mut random[..]);
+    examples.push(random);
 
     for example in examples {
-        let data = crate::encode(&example);
+        let data = crate::encode(&example).unwrap();
         let data = crate::decode(&data);
         assert_eq!(&data[..], &example[..]);
     }

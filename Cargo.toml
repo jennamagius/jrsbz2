@@ -12,3 +12,10 @@ log = "0.4.8"
 env_logger = "0.6.2"
 structopt = "0.2.18"
 crc = "1.8.1"
+no-panic = "0.1.10"
+
+[profile.dev]
+opt-level = 1
+
+[dev-dependencies]
+rand = "0.7.0"

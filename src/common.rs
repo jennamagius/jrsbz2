@@ -13,14 +13,17 @@ pub enum Symbol {
 }
 
 impl Symbol {
-    pub(crate) fn to_u16(&self, syms: &[u8]) -> u16 {
+    pub(crate) fn to_u16(&self, syms: &[u8]) -> Result<u16, &'static str> {
         log::trace!("to_u16: {:?}, {:?}", self, syms);
-        match self {
+        Ok(match self {
             Symbol::RunA => 0,
             Symbol::RunB => 1,
-            Symbol::Idx(a) => a.checked_add(1).unwrap(),
-            Symbol::Eob => u16::try_from(syms.len()).unwrap().checked_add(1).unwrap(),
-        }
+            Symbol::Idx(a) => a.checked_add(1).ok_or("BUG: Symbol::to_u16 Idx overflow")?,
+            Symbol::Eob => u16::try_from(syms.len())
+                .map_err(|_| "BUG: Symbol::to_u16 too many symbols")?
+                .checked_add(1)
+                .ok_or("BUG: Symbol::to_u16 overflow finding index for Eob")?,
+        })
     }
 }
 
