@@ -21,6 +21,8 @@ pub struct Decoder {
     block_symbols: Vec<u16>,
     block_symbols2: Vec<u8>,
     selectors_mtf: Vec<u8>,
+    stream_crc: u32,
+    ignore_crc: bool,
 }
 
 const NEED_BITS: &'static str = "not enough bytes";
@@ -103,6 +105,10 @@ impl Default for DecoderState {
 }
 
 impl Decoder {
+    pub fn ignore_crc(&mut self) {
+        self.ignore_crc = true;
+    }
+
     pub fn push_byte(&mut self, byte: u8) -> Result<Vec<u8>, &'static str> {
         self.stash_bits(byte, 8);
         let mut final_result = Vec::new();
@@ -137,6 +143,7 @@ impl Decoder {
                         Err("bad magic")
                     } else {
                         *idx += 2;
+                        self.stream_crc = 0;
                         Ok(None)
                     }
                 }
@@ -388,7 +395,7 @@ impl Decoder {
                         if *symbol == u16::try_from(self.stack.len() + 1).unwrap() {
                             self.state = DecoderState::BlockStart { idx: 0 };
                             self.accumulator.drain(..cursor);
-                            return Ok(Some(self.decode_block()));
+                            return Ok(Some(self.decode_block()?));
                         }
                         self.block_symbols.push(*symbol);
                         self.accumulator.drain(..cursor);
@@ -398,7 +405,10 @@ impl Decoder {
             }
             DecoderState::StreamFooter { ref mut idx } => match idx {
                 6 => {
-                    let _crc = consume_bytes(&mut self.accumulator, 4)?;
+                    let crc = consume_bytes(&mut self.accumulator, 4)?;
+                    if !self.ignore_crc && crc != self.stream_crc.to_be_bytes() {
+                        return Err("stream CRC mismatch");
+                    }
                     *idx = 10;
                     Ok(None)
                 }
@@ -430,7 +440,7 @@ impl Decoder {
         }
     }
 
-    fn decode_block(&mut self) -> Vec<u8> {
+    fn decode_block(&mut self) -> Result<Vec<u8>, &'static str> {
         self.un_rle2();
         self.un_mtf();
         self.un_bwt();
@@ -441,9 +451,19 @@ impl Decoder {
         self.selectors.clear();
         self.block_symbols.clear();
         self.stack.clear();
+        self.crc32.clear();
         self.num_sels = 0;
         self.num_trees = 0;
-        tmp
+        let mut crc_hasher = crc::crc32::Digest::new(crc::crc32::IEEE);
+        for &i in &tmp {
+            crc::crc32::Hasher32::write(&mut crc_hasher, &[i.reverse_bits()][..]);
+        }
+        let computed_crc = crc::crc32::Hasher32::sum32(&crc_hasher).reverse_bits();
+        if !self.ignore_crc && &self.crc32[..] != &computed_crc.to_be_bytes()[..] {
+            return Err("block crc mismatch");
+        }
+        self.stream_crc = computed_crc ^ ((self.stream_crc << 1) | (self.stream_crc >> 31));
+        Ok(tmp)
     }
 
     fn un_rle1(&mut self) {

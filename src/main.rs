@@ -1,7 +1,9 @@
 #[derive(structopt::StructOpt)]
 struct Args {
-    #[structopt(short = "d")]
+    #[structopt(short = "d", help = "Decompress")]
     decompress: bool,
+    #[structopt(short = "i", help = "Do not validate CRCs when decompressing")]
+    ignore_crc: bool,
 }
 
 fn main() {
@@ -14,6 +16,9 @@ fn main() {
     let mut stdin_lock = stdin.lock();
     if args.decompress {
         let mut decoder = jrsbz2::Decoder::default();
+        if args.ignore_crc {
+            decoder.ignore_crc();
+        }
         loop {
             match std::io::Read::read(&mut stdin_lock, &mut buf) {
                 Ok(1) => {
