@@ -13,6 +13,8 @@ pub struct Encoder {
     emission_buffer: VecDeque<bool>,
     block_buffer: Vec<u8>,
     alignment_ticker: u8,
+    block_crc: Option<crc::crc32::Digest>,
+    stream_crc: u32,
 }
 
 impl Encoder {
@@ -20,6 +22,10 @@ impl Encoder {
         if !self.stream_header_emitted {
             self.emit_stream_header();
         }
+        if self.block_crc.is_none() {
+            self.block_crc = Some(crc::crc32::Digest::new(crc::crc32::IEEE));
+        }
+        crc::Hasher32::write(self.block_crc.as_mut().unwrap(), &[byte.reverse_bits()][..]);
         self.block_buffer.push(byte);
         if self.block_buffer.len() == 900_000_000 {
             self.emit_block();
@@ -39,10 +45,19 @@ impl Encoder {
     }
 
     fn emit_block(&mut self) {
+        log::trace!("Emitting block");
+        let crc = crc::Hasher32::sum32(self.block_crc.as_ref().unwrap()).reverse_bits();
+        self.stream_crc = crc ^ ((self.stream_crc << 1) | (self.stream_crc >> 31));
+        let crc = crc.to_be_bytes();
+        self.block_crc.take();
         self.emit_bytes(crate::common::BLOCK_MAGIC);
+        log::trace!("block crc: {:?}", crc);
+        self.emit_bytes(&crc[..]);
         self.emit_bit(false); // "Randomized" flag
         let rle1 = rle_encode(&self.block_buffer);
+        self.block_buffer.clear();
         let (mut bwt_data, origin_ptr) = bwt_encode(&rle1);
+        let origin_ptr: u32 = u32::try_from(origin_ptr).unwrap();
         self.emit_bytes(&origin_ptr.to_be_bytes()[1..]); // OrigPtr
         let mtf_stack: std::collections::BTreeSet<u8> =
             mtf_encode(&mut bwt_data).into_iter().collect();
@@ -153,7 +168,8 @@ impl Encoder {
 
     fn emit_stream_footer(&mut self) {
         self.emit_bytes(crate::common::STREAM_FOOTER_MAGIC);
-        self.emit_bytes(b"\x00\x00\x00\x00");
+        let crc = self.stream_crc;
+        self.emit_bytes(&crc.to_be_bytes()[..]);
         while self.alignment_ticker != 0 {
             self.emit_bit(false);
         }
