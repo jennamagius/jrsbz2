@@ -27,7 +27,7 @@ impl Encoder {
         }
         crc::Hasher32::write(self.block_crc.as_mut().unwrap(), &[byte.reverse_bits()][..]);
         self.block_buffer.push(byte);
-        if self.block_buffer.len() == 900_000_000 {
+        if self.block_buffer.len() == 900_000 {
             self.emit_block();
         }
         Ok(self.drain_available_bytes())
