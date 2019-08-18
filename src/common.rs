@@ -1,7 +1,5 @@
-use arrayvec::ArrayVec;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
-use std::convert::TryInto;
 
 pub(crate) const STREAM_FOOTER_MAGIC: &[u8] = b"\x17\x72\x45\x38\x50\x90";
 pub(crate) const BLOCK_MAGIC: &[u8] = b"\x31\x41\x59\x26\x53\x59";
@@ -10,17 +8,18 @@ pub(crate) const BLOCK_MAGIC: &[u8] = b"\x31\x41\x59\x26\x53\x59";
 pub enum Symbol {
     RunA,
     RunB,
-    Idx(u8),
+    Idx(u16),
     Eob,
 }
 
 impl Symbol {
-    pub(crate) fn to_u16(&self, num_syms: u8) -> u16 {
+    pub(crate) fn to_u16(&self, syms: &[u8]) -> u16 {
+        log::trace!("to_u16: {:?}, {:?}", self, syms);
         match self {
             Symbol::RunA => 0,
             Symbol::RunB => 1,
-            Symbol::Idx(a) => u16::from(*a) + 2,
-            Symbol::Eob => u16::from(num_syms - 1),
+            Symbol::Idx(a) => a.checked_add(1).unwrap(),
+            Symbol::Eob => u16::try_from(syms.len()).unwrap().checked_add(1).unwrap(),
         }
     }
 }

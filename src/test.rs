@@ -111,14 +111,17 @@ fn empty_encode_test() {
 #[test]
 fn encode_decode_test() {
     log_init();
-    let mut encoder = crate::encode::Encoder::default();
-    let mut result = Vec::new();
-    result.extend(encoder.push_byte(b'a'));
-    result.extend(encoder.finish());
-    let mut decoder = crate::Decoder::default();
-    let mut decode_result: Vec<u8> = Vec::new();
-    for byte in result {
-        decode_result.extend(decoder.push_byte(byte).unwrap());
+
+    let mut examples = [b"a".to_vec(), b"asdf".to_vec()].to_vec();
+    let mut all_bytes = Vec::new();
+    for i in 0..=255 {
+        all_bytes.push(i);
     }
-    assert_eq!(&decode_result[..], &b"a"[..]);
+    examples.push(all_bytes);
+
+    for example in examples {
+        let data = crate::encode(&example);
+        let data = crate::decode(&data);
+        assert_eq!(&data[..], &example[..]);
+    }
 }

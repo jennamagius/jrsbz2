@@ -1,5 +1,5 @@
+use crate::common::abencode;
 use crate::common::Symbol;
-use crate::common::{abdecode, abencode};
 
 use arrayvec::ArrayVec;
 use std::collections::BTreeMap;
@@ -46,12 +46,27 @@ impl Encoder {
         self.emit_bytes(&origin_ptr.to_be_bytes()[1..]); // OrigPtr
         let mtf_stack: std::collections::BTreeSet<u8> =
             mtf_encode(&mut bwt_data).into_iter().collect();
+        let mtf_stack2: Vec<u8> = mtf_stack.iter().cloned().collect();
         let mut rle2 = rle2_encode(&bwt_data);
         rle2.push(Symbol::Eob);
+
+        // The decoder assumes that a tree will be NumSyms + 2 entries long. We have to make sure it IS that long, even though it often doesn't have any reason to be that long.
+        rle2.push(Symbol::RunA);
+        rle2.push(Symbol::RunB);
+        for i in 1..=mtf_stack.len() {
+            rle2.push(Symbol::Idx(i.try_into().unwrap()));
+        }
         log::trace!("rl2: {:?}", rle2);
         let tree = huff_encode(&rle2);
+
+        // Remove the stray RunA, RunB, and Idx()es we added to pad out the tree size.
+        rle2.pop();
+        rle2.pop();
+        for _ in 0..mtf_stack.len() {
+            rle2.pop();
+        }
         log::trace!("Tree: {:?}", tree);
-        let depth_map = huff_node_to_depth_map(&tree, 0, mtf_stack.len().try_into().unwrap());
+        let depth_map = huff_node_to_depth_map(&tree, 0, &mtf_stack2);
         log::trace!("Depth map: {:?}", depth_map);
         let code_map = crate::common::depth_map_to_code_map(&depth_map);
 
@@ -63,7 +78,7 @@ impl Encoder {
             for offset in 0..16 {
                 page_bitset <<= 1;
                 let val = page_number * 16 + offset;
-                if val == 0 || mtf_stack.contains(&(val - 1)) {
+                if mtf_stack.contains(&(val)) {
                     pages_bitset |= 1;
                     page_bitset |= 1;
                 }
@@ -124,9 +139,7 @@ impl Encoder {
         }
 
         for symbol in rle2 {
-            let code = code_map
-                .get(&symbol.to_u16(mtf_stack.len().try_into().unwrap()))
-                .unwrap();
+            let code = code_map.get(&symbol.to_u16(&mtf_stack2)).unwrap();
             for bit in code {
                 self.emit_bit(*bit);
             }
@@ -301,10 +314,10 @@ pub fn rle2_encode(data: &[u8]) -> Vec<Symbol> {
     let mut zero_count = 0;
     for &i in data {
         if zero_count == 0 && i != 0 {
-            output.push(Symbol::Idx(i));
+            output.push(Symbol::Idx(i.into()));
         } else if zero_count > 0 && i != 0 {
             output.extend(abencode(zero_count));
-            output.push(Symbol::Idx(i));
+            output.push(Symbol::Idx(i.into()));
             zero_count = 0;
         } else {
             debug_assert!(i == 0);
@@ -408,19 +421,27 @@ pub fn huff_encode(symbols: &[Symbol]) -> HuffmanNode {
     nodes.remove(0)
 }
 
-fn huff_node_to_depth_map(
-    node: &HuffmanNode,
-    current_depth: u8,
-    num_syms: u8,
-) -> BTreeMap<u16, u8> {
+fn huff_node_to_depth_map(node: &HuffmanNode, current_depth: u8, syms: &[u8]) -> BTreeMap<u16, u8> {
     let mut result = BTreeMap::new();
     if node.is_leaf() {
-        result.insert(node.symbol().to_u16(num_syms), current_depth);
+        let repr = node.symbol().to_u16(syms);
+        log::trace!("Representing {:?} as {}", node.symbol(), repr);
+        result.insert(repr, current_depth);
         result
     } else {
         let next_depth = current_depth.checked_add(1).unwrap();
-        result.extend(huff_node_to_depth_map(node.left(), next_depth, num_syms));
-        result.extend(huff_node_to_depth_map(node.right(), next_depth, num_syms));
+        result.extend(huff_node_to_depth_map(node.left(), next_depth, syms));
+        result.extend(huff_node_to_depth_map(node.right(), next_depth, syms));
         result
     }
+}
+
+pub fn encode(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut encoder = crate::encode::Encoder::default();
+    for i in data {
+        result.extend(encoder.push_byte(*i));
+    }
+    result.extend(encoder.finish());
+    result
 }

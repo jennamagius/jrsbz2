@@ -570,3 +570,12 @@ fn consume_u16(bits: &mut Vec<bool>) -> Result<u16, &'static str> {
     stack.copy_from_slice(&bytes);
     Ok(u16::from_be_bytes(stack))
 }
+
+pub fn decode(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut decoder = Decoder::default();
+    for i in data {
+        result.extend(decoder.push_byte(*i).unwrap());
+    }
+    result
+}

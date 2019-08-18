@@ -7,5 +7,7 @@ mod encode;
 #[cfg(test)]
 mod test;
 
+pub use crate::decode::decode;
 pub use crate::decode::Decoder;
+pub use crate::encode::encode;
 pub use crate::encode::Encoder;
