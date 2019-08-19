@@ -29,7 +29,7 @@ fn format_decode_test() {
 fn decode_bwt_test() {
     LOGGER_INIT.call_once(env_logger::init);
     let data = b"?fsrrdkkeaddrrffs,es???d\x01     eeiiiieeeehrppkllkppttpphppPPIootwppppPPcccccckk      iipp    eeeeeeeeer'ree  ";
-    assert_eq!(&decode_bwt(data, 24)[..], &b"If Peter Piper picked a peck of pickled peppers, where\'s the peck of pickled peppers Peter Piper picked????\x01"[..]);
+    assert_eq!(&decode_bwt(data, 24).unwrap()[..], &b"If Peter Piper picked a peck of pickled peppers, where\'s the peck of pickled peppers Peter Piper picked????\x01"[..]);
 }
 
 #[test]

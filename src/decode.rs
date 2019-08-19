@@ -452,7 +452,6 @@ impl Decoder {
         self.selectors.clear();
         self.block_symbols.clear();
         self.stack.clear();
-        self.crc32.clear();
         self.num_sels = 0;
         self.num_trees = 0;
         let mut crc_hasher = crc::crc32::Digest::new(crc::crc32::IEEE);
@@ -464,6 +463,7 @@ impl Decoder {
             return Err("block crc mismatch");
         }
         self.stream_crc = computed_crc ^ ((self.stream_crc << 1) | (self.stream_crc >> 31));
+        self.crc32.clear();
         Ok(tmp)
     }
 
