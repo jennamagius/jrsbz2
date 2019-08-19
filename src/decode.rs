@@ -50,12 +50,13 @@ fn decode_bwt_slow(bwt: &[u8], ptr: usize) -> Vec<u8> {
     return matrix[usize::try_from(ptr).unwrap()].clone();
 }
 
-pub(crate) fn decode_bwt(bwt: &[u8], ptr: usize) -> Vec<u8> {
-    let mut cumm = Vec::new();
+pub(crate) fn decode_bwt(bwt: &[u8], ptr: usize) -> Result<Vec<u8>, &'static str> {
+    let mut cumm = [0usize; 256];
     let mut n = 0;
-    cumm.resize(256, 0);
     for &i in bwt {
-        cumm[usize::from(i)] += 1;
+        cumm[usize::from(i)] = cumm[usize::from(i)]
+            .checked_add(1)
+            .ok_or("histogram overflow")?;
     }
     for idx in 0..cumm.len() {
         let v = cumm[idx];
@@ -77,7 +78,7 @@ pub(crate) fn decode_bwt(bwt: &[u8], ptr: usize) -> Vec<u8> {
         data[j] = bwt[i];
         i = perm[i];
     }
-    data
+    Ok(data)
 }
 
 enum DecoderState {
@@ -443,7 +444,7 @@ impl Decoder {
     fn decode_block(&mut self) -> Result<Vec<u8>, &'static str> {
         self.un_rle2();
         self.un_mtf();
-        self.un_bwt();
+        self.un_bwt()?;
         self.un_rle1();
         let mut tmp = Vec::new();
         std::mem::swap(&mut self.block_symbols2, &mut tmp);
@@ -491,10 +492,11 @@ impl Decoder {
         std::mem::replace(&mut self.block_symbols2, result);
     }
 
-    fn un_bwt(&mut self) {
+    fn un_bwt(&mut self) -> Result<(), &'static str> {
         let ptr: usize = self.orig_ptr.try_into().unwrap();
-        let result = decode_bwt(&self.block_symbols2, ptr);
+        let result = decode_bwt(&self.block_symbols2, ptr)?;
         std::mem::replace(&mut self.block_symbols2, result);
+        Ok(())
     }
 
     fn un_mtf(&mut self) {
