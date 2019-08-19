@@ -357,7 +357,7 @@ pub fn rle2_encode(data: &[u8]) -> Vec<Symbol> {
         if zero_count == 0 && i != 0 {
             output.push(Symbol::Idx(i.into()));
         } else if zero_count > 0 && i != 0 {
-            output.extend(abencode(zero_count));
+            output.extend(abencode(zero_count).unwrap());
             output.push(Symbol::Idx(i.into()));
             zero_count = 0;
         } else {
@@ -366,7 +366,7 @@ pub fn rle2_encode(data: &[u8]) -> Vec<Symbol> {
         }
     }
     if zero_count > 0 {
-        output.extend(abencode(zero_count));
+        output.extend(abencode(zero_count).unwrap());
     }
     output
 }

@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
@@ -27,32 +28,45 @@ impl Symbol {
     }
 }
 
-pub fn abencode(mut zerocnt: u32) -> Vec<Symbol> {
+pub fn abencode(mut zerocnt: u32) -> Result<ArrayVec<[Symbol; 32]>, &'static str> {
     zerocnt += 1;
-    let len = 32 - zerocnt.leading_zeros() - 1;
-    let mut result = Vec::new();
+    let len = 32u32
+        .checked_sub(
+            zerocnt
+                .leading_zeros()
+                .checked_add(1)
+                .ok_or("BUG: integer overflow")?,
+        )
+        .ok_or("cannot abencode 0")?;
+    let mut result = ArrayVec::new();
     for i in 0..len {
         if zerocnt & (1 << i) > 0 {
-            result.push(Symbol::RunB)
+            result
+                .try_push(Symbol::RunB)
+                .map_err(|_| "zerocnt too large")?;
         } else {
-            result.push(Symbol::RunA)
+            result
+                .try_push(Symbol::RunA)
+                .map_err(|_| "zerocnt too large")?;
         }
     }
-    result
+    Ok(result)
 }
 
-pub fn abdecode(symbols: &[Symbol]) -> u32 {
+pub fn abdecode(symbols: &[Symbol]) -> Result<u32, &'static str> {
     let mut result = 0u32;
     for &i in symbols.iter().rev() {
-        assert!(i == Symbol::RunA || i == Symbol::RunB);
+        if !(i == Symbol::RunA || i == Symbol::RunB) {
+            return Err("invalid abdecode input");
+        }
         result <<= 1;
         if i == Symbol::RunB {
             result |= 1;
         }
     }
     result |= 1 << symbols.len();
-    result -= 1;
-    result
+    result = result.checked_sub(1).ok_or("integer underflow")?;
+    Ok(result)
 }
 
 fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {

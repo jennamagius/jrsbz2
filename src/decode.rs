@@ -523,7 +523,7 @@ impl Decoder {
                     log::trace!("Pushing a single {}", i - 1);
                     new_block.push(i - 1);
                 } else {
-                    let count = abdecode(&ab_accumulator);
+                    let count = abdecode(&ab_accumulator).unwrap();
                     log::trace!("Pushing {} zeros, then a {}", count, i - 1);
                     for _ in 0..count {
                         new_block.push(0);
@@ -535,7 +535,7 @@ impl Decoder {
                 ab_accumulator.push(if i == 0 { Symbol::RunA } else { Symbol::RunB });
             }
         }
-        for _ in 0..abdecode(&ab_accumulator) {
+        for _ in 0..abdecode(&ab_accumulator).unwrap() {
             log::trace!("Pushing a trailing zero");
             new_block.push(0);
         }

@@ -34,43 +34,67 @@ fn decode_bwt_test() {
 
 #[test]
 fn abencode_test() {
-    assert_eq!(abencode(1), vec![Symbol::RunA]);
-    assert_eq!(abencode(2), vec![Symbol::RunB]);
-    assert_eq!(abencode(3), vec![Symbol::RunA, Symbol::RunA]);
-    assert_eq!(abencode(4), vec![Symbol::RunB, Symbol::RunA]);
-    assert_eq!(abencode(5), vec![Symbol::RunA, Symbol::RunB]);
-    assert_eq!(abencode(6), vec![Symbol::RunB, Symbol::RunB]);
-    assert_eq!(abencode(7), vec![Symbol::RunA, Symbol::RunA, Symbol::RunA]);
-    assert_eq!(abencode(8), vec![Symbol::RunB, Symbol::RunA, Symbol::RunA]);
-    assert_eq!(abencode(9), vec![Symbol::RunA, Symbol::RunB, Symbol::RunA]);
-    assert_eq!(abencode(10), vec![Symbol::RunB, Symbol::RunB, Symbol::RunA]);
-    assert_eq!(abencode(11), vec![Symbol::RunA, Symbol::RunA, Symbol::RunB]);
-    assert_eq!(abencode(12), vec![Symbol::RunB, Symbol::RunA, Symbol::RunB]);
-    assert_eq!(abencode(13), vec![Symbol::RunA, Symbol::RunB, Symbol::RunB]);
-    assert_eq!(abencode(14), vec![Symbol::RunB, Symbol::RunB, Symbol::RunB]);
+    assert_eq!(&abencode(1).unwrap()[..], &[Symbol::RunA][..]);
+    assert_eq!(&abencode(2).unwrap()[..], &[Symbol::RunB][..]);
+    assert_eq!(&abencode(3).unwrap(), &[Symbol::RunA, Symbol::RunA][..]);
+    assert_eq!(&abencode(4).unwrap(), &[Symbol::RunB, Symbol::RunA][..]);
+    assert_eq!(&abencode(5).unwrap(), &[Symbol::RunA, Symbol::RunB][..]);
+    assert_eq!(&abencode(6).unwrap(), &[Symbol::RunB, Symbol::RunB][..]);
     assert_eq!(
-        abencode(15),
-        vec![Symbol::RunA, Symbol::RunA, Symbol::RunA, Symbol::RunA]
+        &abencode(7).unwrap(),
+        &[Symbol::RunA, Symbol::RunA, Symbol::RunA][..]
     );
     assert_eq!(
-        abencode(16),
-        vec![Symbol::RunB, Symbol::RunA, Symbol::RunA, Symbol::RunA]
+        &abencode(8).unwrap(),
+        &[Symbol::RunB, Symbol::RunA, Symbol::RunA][..]
     );
     assert_eq!(
-        abencode(17),
-        vec![Symbol::RunA, Symbol::RunB, Symbol::RunA, Symbol::RunA]
+        &abencode(9).unwrap(),
+        &[Symbol::RunA, Symbol::RunB, Symbol::RunA][..]
     );
     assert_eq!(
-        abencode(18),
-        vec![Symbol::RunB, Symbol::RunB, Symbol::RunA, Symbol::RunA]
+        &abencode(10).unwrap(),
+        &[Symbol::RunB, Symbol::RunB, Symbol::RunA][..]
     );
-    assert_eq!(abencode(30).len(), 4);
-    assert_eq!(abencode(31).len(), 5);
-    assert_eq!(abencode(62).len(), 5);
-    assert_eq!(abencode(63).len(), 6);
+    assert_eq!(
+        &abencode(11).unwrap(),
+        &[Symbol::RunA, Symbol::RunA, Symbol::RunB][..]
+    );
+    assert_eq!(
+        &abencode(12).unwrap(),
+        &[Symbol::RunB, Symbol::RunA, Symbol::RunB][..]
+    );
+    assert_eq!(
+        &abencode(13).unwrap(),
+        &[Symbol::RunA, Symbol::RunB, Symbol::RunB][..]
+    );
+    assert_eq!(
+        &abencode(14).unwrap(),
+        &[Symbol::RunB, Symbol::RunB, Symbol::RunB][..]
+    );
+    assert_eq!(
+        &abencode(15).unwrap(),
+        &[Symbol::RunA, Symbol::RunA, Symbol::RunA, Symbol::RunA][..]
+    );
+    assert_eq!(
+        &abencode(16).unwrap(),
+        &[Symbol::RunB, Symbol::RunA, Symbol::RunA, Symbol::RunA][..]
+    );
+    assert_eq!(
+        &abencode(17).unwrap(),
+        &[Symbol::RunA, Symbol::RunB, Symbol::RunA, Symbol::RunA][..]
+    );
+    assert_eq!(
+        &abencode(18).unwrap(),
+        &[Symbol::RunB, Symbol::RunB, Symbol::RunA, Symbol::RunA][..]
+    );
+    assert_eq!(abencode(30).unwrap().len(), 4);
+    assert_eq!(abencode(31).unwrap().len(), 5);
+    assert_eq!(abencode(62).unwrap().len(), 5);
+    assert_eq!(abencode(63).unwrap().len(), 6);
     for i in 0..=64 {
-        let encoded = abencode(i);
-        let decoded = abdecode(&encoded[..]);
+        let encoded = abencode(i).unwrap();
+        let decoded = abdecode(&encoded[..]).unwrap();
         assert_eq!(decoded, i);
     }
 }
@@ -119,10 +143,11 @@ fn encode_decode_test() {
     }
     examples.push(all_bytes);
     examples.push([171, 10, 25, 159, 216, 62, 237, 173, 28, 171].to_vec());
-    let mut rng = rand::thread_rng();
-    let mut random = vec![0u8; 9000];
-    rand::Rng::fill(&mut rng, &mut random[..]);
-    examples.push(random);
+
+    //let mut rng = rand::thread_rng();
+    //let mut random = vec![0u8; 9000];
+    //rand::Rng::fill(&mut rng, &mut random[..]);
+    //examples.push(random);
 
     for example in examples {
         let data = crate::encode(&example).unwrap();
