@@ -96,3 +96,30 @@ pub(crate) fn depth_map_to_code_map(tree: &BTreeMap<u16, u8>) -> BTreeMap<u16, V
     }
     result
 }
+
+const BACKING_BUFFER_CAPACITY: usize = 900_000;
+
+pub(crate) struct BackingBuffer([u8; BACKING_BUFFER_CAPACITY]);
+
+unsafe impl arrayvec::Array for BackingBuffer {
+    type Item = u8;
+    type Index = u32;
+
+    fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+
+    fn capacity() -> usize {
+        BACKING_BUFFER_CAPACITY
+    }
+}
+
+impl Default for BackingBuffer {
+    fn default() -> Self {
+        BackingBuffer([0u8; BACKING_BUFFER_CAPACITY])
+    }
+}

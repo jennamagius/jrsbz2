@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::convert::TryInto;
 
+type Bitstore = jarraybitvec::ArrayBitVec<crate::common::BackingBuffer>;
+
 #[derive(Default)]
 pub struct Decoder {
     state: DecoderState,
@@ -12,7 +14,7 @@ pub struct Decoder {
     crc32: ArrayVec<[u8; 4]>,
     orig_ptr: u32,
     stack: Vec<u8>,
-    accumulator: Vec<bool>,
+    accumulator: Box<Bitstore>,
     misalignment: u8,
     num_trees: u8,
     num_sels: u16,
@@ -285,7 +287,7 @@ impl Decoder {
                         *state = BlockTreesState::Trees;
                         Ok(None)
                     } else {
-                        if !self.accumulator.iter().any(|x| *x == false) {
+                        if !self.accumulator.iter().any(|x| x == false) {
                             Err(NEED_BITS)
                         } else {
                             let mut selector_number = 0;
@@ -312,8 +314,7 @@ impl Decoder {
                         Err(NEED_BITS)
                     } else {
                         let mut cursor = 5;
-                        let clen_bits: Vec<bool> =
-                            self.accumulator.iter().copied().take(5).collect();
+                        let clen_bits: Vec<bool> = self.accumulator.iter().take(5).collect();
                         let mut clen = 0u8;
                         for i in clen_bits {
                             clen <<= 1;
@@ -334,8 +335,7 @@ impl Decoder {
                                         return Err(NEED_BITS);
                                     }
                                     Some(true) => {
-                                        let other_bit =
-                                            self.accumulator.iter().skip(cursor).copied().next();
+                                        let other_bit = self.accumulator.iter().skip(cursor).next();
                                         cursor += 1;
                                         if other_bit.is_none() {
                                             return Err(NEED_BITS);
@@ -363,7 +363,7 @@ impl Decoder {
                         let tree = depth_map_to_code_map(&tree);
                         log::trace!("tree map: {:?}", tree);
                         self.trees.push(tree);
-                        self.accumulator.drain(..cursor);
+                        self.accumulator.advance(cursor);
                         Ok(None)
                     }
                 }
@@ -377,7 +377,7 @@ impl Decoder {
                     if next_bit.is_none() {
                         return Err(NEED_BITS);
                     }
-                    bits.push(*next_bit.unwrap());
+                    bits.push(next_bit.unwrap());
                     if bits.len() > 20 {
                         return Err("bit sequence doesn't match a known huffman code");
                     }
@@ -395,11 +395,11 @@ impl Decoder {
                         );
                         if *symbol == u16::try_from(self.stack.len() + 1).unwrap() {
                             self.state = DecoderState::BlockStart { idx: 0 };
-                            self.accumulator.drain(..cursor);
+                            self.accumulator.advance(cursor);
                             return Ok(Some(self.decode_block()?));
                         }
                         self.block_symbols.push(*symbol);
-                        self.accumulator.drain(..cursor);
+                        self.accumulator.advance(cursor);
                         return Ok(None);
                     }
                 }
@@ -436,7 +436,7 @@ impl Decoder {
         assert!(how_many <= 8);
         byte = byte << (8 - how_many);
         for _ in 0..how_many {
-            self.accumulator.push(byte & 0b1000_0000 != 0);
+            self.accumulator.push_bit(byte & 0b1000_0000 != 0);
             byte = byte << 1;
         }
     }
@@ -544,35 +544,40 @@ impl Decoder {
     }
 }
 
-fn consume_bit(bits: &mut Vec<bool>) -> Result<bool, &'static str> {
+fn consume_bit(bits: &mut Bitstore) -> Result<bool, &'static str> {
     if bits.is_empty() {
         return Err(NEED_BITS);
     }
-    Ok(bits.remove(0))
+    Ok(bits.pop_bit_front())
 }
 
-fn consume_bits(bits: &mut Vec<bool>, count: usize) -> Result<Vec<bool>, &'static str> {
+fn consume_bits(bits: &mut Bitstore, count: usize) -> Result<Vec<bool>, &'static str> {
     if bits.len() < count {
         return Err(NEED_BITS);
     }
-    Ok(bits.drain(..count).collect())
-}
-
-fn consume_byte(bits: &mut Vec<bool>) -> Result<u8, &'static str> {
-    if bits.len() < 8 {
-        return Err(NEED_BITS);
-    }
-    let mut result = 0u8;
-    for i in bits.drain(..8) {
-        result <<= 1;
-        if i {
-            result |= 1;
-        }
+    let mut result = Vec::new();
+    for _ in 0..count {
+        result.push(bits.pop_bit_front());
     }
     Ok(result)
 }
 
-fn consume_bytes(bits: &mut Vec<bool>, count: usize) -> Result<Vec<u8>, &'static str> {
+fn consume_byte(bits: &mut Bitstore) -> Result<u8, &'static str> {
+    if bits.len() < 8 {
+        return Err(NEED_BITS);
+    }
+    let mut result = 0u8;
+    for _ in 0..8 {
+        result <<= 1;
+        if bits.pop_bit_front() {
+            result |= 1;
+        }
+    }
+
+    Ok(result)
+}
+
+fn consume_bytes(bits: &mut Bitstore, count: usize) -> Result<Vec<u8>, &'static str> {
     if bits.len() < count * 8 {
         return Err(NEED_BITS);
     }
@@ -583,7 +588,7 @@ fn consume_bytes(bits: &mut Vec<bool>, count: usize) -> Result<Vec<u8>, &'static
     Ok(result)
 }
 
-fn consume_u16(bits: &mut Vec<bool>) -> Result<u16, &'static str> {
+fn consume_u16(bits: &mut Bitstore) -> Result<u16, &'static str> {
     if bits.len() < 16 {
         return Err(NEED_BITS);
     }
