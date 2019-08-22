@@ -1,4 +1,5 @@
 use arrayvec::ArrayVec;
+use bitvec::vec::BitVec;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
@@ -69,7 +70,7 @@ pub fn abdecode(symbols: &[Symbol]) -> Result<u32, &'static str> {
     Ok(result)
 }
 
-fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {
+fn code_to_bits(mut code: usize, bits: u8) -> BitVec {
     let mut result = Vec::new();
     for _ in 0..bits {
         result.push(code & 1 != 0);
@@ -79,7 +80,7 @@ fn code_to_bits(mut code: usize, bits: u8) -> Vec<bool> {
 }
 
 /// Converts a mapping of { symbol : bit_depth } into a mapping of { symbol : bit_representation } as a canonical huffman code.
-pub(crate) fn depth_map_to_code_map(tree: &BTreeMap<u16, u8>) -> BTreeMap<u16, Vec<bool>> {
+pub(crate) fn depth_map_to_code_map(tree: &BTreeMap<u16, u8>) -> BTreeMap<u16, BitVec> {
     let mut result = BTreeMap::new();
     let mut data: Vec<(u8, u16)> = tree.iter().map(|(k, v)| (*v, *k)).collect();
     data.sort();

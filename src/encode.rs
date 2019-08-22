@@ -2,15 +2,15 @@ use crate::common::abencode;
 use crate::common::Symbol;
 
 use arrayvec::ArrayVec;
+use bitvec::vec::BitVec;
 use std::collections::BTreeMap;
-use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::convert::TryInto;
 
 #[derive(Default)]
 pub struct Encoder {
     stream_header_emitted: bool,
-    emission_buffer: VecDeque<bool>,
+    emission_buffer: BitVec,
     block_buffer: Vec<u8>,
     alignment_ticker: u8,
     block_crc: Option<crc::crc32::Digest>,
@@ -159,7 +159,7 @@ impl Encoder {
         for symbol in rle2 {
             let code = code_map.get(&symbol.to_u16(&mtf_stack2).unwrap()).unwrap();
             for bit in code {
-                self.emit_bit(*bit);
+                self.emit_bit(bit);
             }
         }
     }
@@ -191,7 +191,7 @@ impl Encoder {
     }
 
     fn emit_bit(&mut self, bit: bool) {
-        self.emission_buffer.push_back(bit);
+        self.emission_buffer.push(bit);
         self.alignment_ticker = (self.alignment_ticker + 1) % 8;
     }
 
@@ -199,7 +199,7 @@ impl Encoder {
         let mut result = 0u8;
         for _ in 0..8 {
             result <<= 1;
-            if self.emission_buffer.pop_front().unwrap() {
+            if self.emission_buffer.remove(0) {
                 result |= 1;
             }
         }
